@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Arbitrage Monitor</title>
+    <!-- Load Lightweight Charts from local server -->
+    <script src="lightweight-charts.js"></script>
+    <style>
+        :root {
+            --bg-color: #0d1117;
+            --card-bg: #161b22;
+            --text-primary: #c9d1d9;
+            --text-secondary: #8b949e;
+            --accent: #58a6ff;
+            --border: #30363d;
+            --green: #238636;
+            --red: #da3633;
+        }
+        
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            box-sizing: border-box;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        h1 { margin: 0; font-size: 1.5rem; }
+
+        .status {
+            font-size: 0.9rem;
+            color: var(--text-secondary);
+        }
+        .status.connected { color: var(--green); }
+        .status.disconnected { color: var(--red); }
+
+        .container {
+            display: flex;
+            flex: 1;
+            gap: 20px;
+            overflow: hidden;
+        }
+
+        .charts-column {
+            flex: 3;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            min-width: 0; /* needed for chart resize */
+        }
+
+        .chart-container {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 10px;
+            flex: 1;
+            position: relative;
+            min-height: 0;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .chart-title {
+            margin: 0 0 5px 0;
+            font-size: 0.9rem;
+            color: var(--text-secondary);
+        }
+
+        .chart-div {
+            flex: 1;
+            width: 100%;
+        }
+
+        .controls-column {
+            flex: 1;
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 20px;
+            overflow-y: auto;
+            max-width: 300px;
+        }
+
+        .control-group { margin-bottom: 15px; }
+        .control-group label {
+            display: block;
+            margin-bottom: 5px;
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+        }
+        .control-group input {
+            width: 100%;
+            background: var(--bg-color);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            padding: 5px 10px;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        .control-group input:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+
+        button {
+            background-color: #238636;
+            color: white;
+            border: 1px solid rgba(240,246,252,0.1);
+            padding: 5px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            width: 100%;
+            font-weight: 600;
+        }
+        button:hover { background-color: #2ea043; }
+        
+        /* Legend for Price Chart */
+        .chart-legend {
+            position: absolute;
+            top: 40px;
+            left: 20px;
+            z-index: 10;
+            font-size: 12px;
+            font-family: monospace;
+            pointer-events: none;
+        }
+        .legend-item { margin-bottom: 2px; }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Arbitrage Monitor</h1>
+        <div id="connectionStatus" class="status disconnected">Disconnected</div>
+    </header>
+
+    <div class="container">
+        <div class="charts-column">
+            <div class="chart-container" style="flex: 3;">
+                <h3 class="chart-title">Price Candles (MT5 vs OKX)</h3>
+                <div id="priceChart" class="chart-div"></div>
+                <div id="priceLegend" class="chart-legend">
+                    <div class="legend-item" style="color: #4caf50">MT5 <span id="mt5Val"></span></div>
+                    <div class="legend-item" style="color: #ef5350">OKX <span id="okxVal"></span></div>
+                </div>
+            </div>
+            <div class="chart-container" style="flex: 1;">
+                 <h3 class="chart-title">Spread & EMA</h3>
+                <div id="spreadChart" class="chart-div"></div>
+            </div>
+             <div class="chart-container" style="flex: 1;">
+                 <h3 class="chart-title">Volume</h3>
+                <div id="volumeChart" class="chart-div"></div>
+            </div>
+        </div>
+        
+        <div class="controls-column">
+            <h3>Parameters</h3>
+            <div id="paramsForm">
+                <!-- Params generated here -->
+            </div>
+            <button id="updateBtn">Update Params</button>
+            <div style="margin-top: 20px; font-size: 0.8rem; color: #8b949e;">
+                <p>OKX: <span id="okxSymbol">-</span></p>
+                <p>MT5: <span id="mt5Symbol">-</span></p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- Lightweight Charts Setup ---
+        const { createChart, ColorType, CrosshairMode, LineStyle } = LightweightCharts;
+
+        const chartOptions = {
+            layout: {
+                textColor: '#c9d1d9',
+                background: { type: ColorType.Solid, color: '#161b22' },
+            },
+            grid: {
+                vertLines: { color: '#30363d' },
+                horzLines: { color: '#30363d' },
+            },
+            crosshair: {
+                mode: CrosshairMode.Normal,
+            },
+            timeScale: {
+                timeVisible: true,
+                secondsVisible: false,
+                borderColor: '#30363d',
+            },
+            rightPriceScale: {
+                borderColor: '#30363d',
+            },
+        };
+
+        // 1. Price Chart
+        const priceContainer = document.getElementById('priceChart');
+        const priceChart = createChart(priceContainer, chartOptions);
+        
+        // MT5 Candle Series
+        const mt5Series = priceChart.addSeries(LightweightCharts.CandlestickSeries, {
+            upColor: '#238636', 
+            downColor: '#da3633', 
+            borderUpColor: '#238636',
+            borderDownColor: '#da3633',
+            wickUpColor: '#238636',
+            wickDownColor: '#da3633',
+            title: 'MT5',
+        });
+        
+        // OKX Candle Series
+        const okxSeries = priceChart.addSeries(LightweightCharts.CandlestickSeries, {
+            upColor: '#4caf50', // Green
+            downColor: '#ef5350', // Red
+            borderUpColor: '#4caf50',
+            borderDownColor: '#ef5350',
+            wickUpColor: '#4caf50',
+            wickDownColor: '#ef5350',
+            title: 'OKX',
+        });
+        
+        // 2. Spread Chart
+        const spreadContainer = document.getElementById('spreadChart');
+        const spreadChart = createChart(spreadContainer, chartOptions);
+        
+        const spreadSeries = spreadChart.addSeries(LightweightCharts.LineSeries, {
+            color: '#d29922', // Yellow
+            lineWidth: 2,
+            title: 'Spread',
+        });
+        const emaSeries = spreadChart.addSeries(LightweightCharts.LineSeries, {
+            color: '#ffffff',
+            lineWidth: 1,
+            lineStyle: LineStyle.Dashed,
+            title: 'EMA',
+        });
+        
+        // Bands will be added dynamically. We store references here.
+        let bandSeries = [];
+
+        // 3. Volume Chart
+        const volContainer = document.getElementById('volumeChart');
+        const volChart = createChart(volContainer, {
+            ...chartOptions,
+            rightPriceScale: {
+                 scaleMargins: {
+                    top: 0.1,
+                    bottom: 0,
+                },
+            }
+        });
+        
+        const mt5VolSeries = volChart.addSeries(LightweightCharts.HistogramSeries, {
+            color: '#26a69a',
+            priceFormat: { type: 'volume' },
+            title: 'MT5 Vol',
+        });
+         const okxVolSeries = volChart.addSeries(LightweightCharts.HistogramSeries, {
+            color: '#ef5350',
+            priceFormat: { type: 'volume' },
+             title: 'OKX Vol',
+        });
+
+        // Resize observer to handle responsiveness
+        new ResizeObserver(entries => {
+            if (entries.length === 0 || entries[0].target !== priceContainer) { return; }
+            const newRect = entries[0].contentRect;
+            priceChart.applyOptions({ width: newRect.width, height: newRect.height });
+        }).observe(priceContainer);
+
+        new ResizeObserver(entries => {
+            if (entries.length === 0 || entries[0].target !== spreadContainer) { return; }
+            const newRect = entries[0].contentRect;
+            spreadChart.applyOptions({ width: newRect.width, height: newRect.height });
+        }).observe(spreadContainer);
+        
+        new ResizeObserver(entries => {
+            if (entries.length === 0 || entries[0].target !== volContainer) { return; }
+            const newRect = entries[0].contentRect;
+            volChart.applyOptions({ width: newRect.width, height: newRect.height });
+        }).observe(volContainer);
+        
+        // Sync Reference: https://github.com/tradingview/lightweight-charts/issues/322
+        // Simple sync:
+        const charts = [priceChart, spreadChart, volChart];
+        
+        function syncCharts(sourceChart) {
+            const range = sourceChart.timeScale().getVisibleLogicalRange();
+            if (!range) return;
+            charts.forEach(c => {
+                if (c !== sourceChart) {
+                    c.timeScale().setVisibleLogicalRange(range);
+                }
+            });
+        }
+        
+        charts.forEach(c => {
+            c.timeScale().subscribeVisibleLogicalRangeChange(() => syncCharts(c));
+        });
+
+        // WebSocket
+        let ws;
+        let reconnectTimer;
+        const statusEl = document.getElementById('connectionStatus');
+        
+        function connect() {
+            // Allow override via URL query: ?ws=ws://127.0.0.1:8765/ws  or ?wsHost=127.0.0.1:8765
+            const qs = new URLSearchParams(window.location.search);
+            const wsOverride = qs.get('ws');
+            const wsHostOverride = qs.get('wsHost');
+
+            const isFile = window.location.protocol === 'file:';
+            const isHttps = window.location.protocol === 'https:';
+            const scheme = isHttps ? 'wss' : 'ws';
+
+            const host = wsHostOverride
+                ? wsHostOverride
+                : (isFile ? 'localhost:8765' : window.location.host);
+
+            const url = wsOverride || `${scheme}://${host}/ws`;
+            
+            console.log('Connecting to WS:', url);
+            statusEl.textContent = 'Connecting...';
+            statusEl.className = 'status disconnected';
+
+            try {
+                ws = new WebSocket(url);
+            } catch (e) {
+                console.error('WS Create Error', e);
+                scheduleReconnect();
+                return;
+            }
+            
+            ws.onopen = () => {
+                statusEl.textContent = 'Connected';
+                statusEl.className = 'status connected';
+                if (reconnectTimer) {
+                    clearTimeout(reconnectTimer);
+                    reconnectTimer = null;
+                }
+            };
+            
+            ws.onclose = () => {
+                statusEl.textContent = 'Disconnected (Retrying...)';
+                statusEl.className = 'status disconnected';
+                scheduleReconnect();
+            };
+
+            ws.onerror = (err) => {
+                console.error('WS Error', err);
+                // Some browsers will also trigger onclose; closing here helps normalize behavior.
+                try { ws.close(); } catch (_) {}
+            };
+
+            ws.onmessage = (event) => {
+                try {
+                    const msg = JSON.parse(event.data);
+                    handleMessage(msg);
+                } catch (e) {
+                    console.error('Parse error', e);
+                }
+            };
+        }
+
+        function scheduleReconnect() {
+            if (reconnectTimer) return;
+            reconnectTimer = setTimeout(() => {
+                reconnectTimer = null;
+                connect();
+            }, 3000);
+        }
+
+        const paramsForm = document.getElementById('paramsForm');
+        let currentParams = {};
+
+        function handleMessage(msg) {
+            if (msg.type === 'params') {
+                updateParamsUI(msg.payload);
+            } else if (msg.type === 'bar') {
+               updateCharts(msg.payload);
+            }
+        }
+
+        function updateParamsUI(params) {
+            currentParams = { ...currentParams, ...params };
+            document.getElementById('mt5Symbol').textContent = params.MT5_SYMBOL || '-';
+            document.getElementById('okxSymbol').textContent = params.OKX_SYMBOL || '-';
+
+            const editableKeys = ['emaPeriod', 'firstSpread', 'nextSpread', 'takeProfit', 'maxPos'];
+            paramsForm.innerHTML = '';
+            
+            editableKeys.forEach(key => {
+                if (params[key] !== undefined) {
+                    const div = document.createElement('div');
+                    div.className = 'control-group';
+                    const label = document.createElement('label');
+                    label.textContent = key;
+                    const input = document.createElement('input');
+                    input.type = 'number';
+                    input.value = params[key];
+                    input.dataset.key = key;
+                    input.step = key.includes('Spread') || key.includes('Profit') ? '0.1' : '1';
+                    div.appendChild(label);
+                    div.appendChild(input);
+                    paramsForm.appendChild(div);
+                }
+            });
+        }
+
+        document.getElementById('updateBtn').addEventListener('click', () => {
+            const inputs = paramsForm.querySelectorAll('input');
+            const payload = {};
+            inputs.forEach(input => {
+                payload[input.dataset.key] = parseFloat(input.value);
+            });
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'params', payload }));
+            }
+        });
+
+        // Helper to convert ISO string to timestamp for chart
+        // Lightweight charts expects seconds (UNIX) or 'yyyy-mm-dd' string. 
+        // For intraday, we need UNIX timestamp (seconds).
+        function toTime(isoStr) {
+             return Math.floor(new Date(isoStr).getTime() / 1000); 
+        }
+
+        function updateCharts(bar) {
+            const time = toTime(bar.ts);
+            
+            // 1. Price
+            // MT5
+            mt5Series.update({
+                time: time,
+                open: bar.mt5.open,
+                high: bar.mt5.high,
+                low: bar.mt5.low,
+                close: bar.mt5.close
+            });
+            // OKX
+            okxSeries.update({
+                time: time,
+                open: bar.okx.open,
+                high: bar.okx.high,
+                low: bar.okx.low,
+                close: bar.okx.close
+            });
+            
+            // Legend Update
+            document.getElementById('mt5Val').textContent = bar.mt5.close.toFixed(2);
+            document.getElementById('okxVal').textContent = bar.okx.close.toFixed(2);
+
+            // 2. Spread
+            spreadSeries.update({ time: time, value: bar.spread });
+            emaSeries.update({ time: time, value: bar.ema });
+            
+            // Bands
+            // Ensure band series exist
+            if (bandSeries.length < bar.bands.length * 2) {
+                 const currentPairs = bandSeries.length / 2;
+                 for (let i = currentPairs; i < bar.bands.length; i++) {
+                     const lvl = i + 1;
+                     const u = spreadChart.addSeries(LightweightCharts.LineSeries, {
+                         color: 'rgba(57, 211, 83, 0.4)',
+                         lineWidth: 1,
+                         title: `Upper L${lvl}`
+                     });
+                     const l = spreadChart.addSeries(LightweightCharts.LineSeries, {
+                         color: 'rgba(57, 211, 83, 0.4)',
+                         lineWidth: 1,
+                         title: `Lower L${lvl}`
+                     });
+                     bandSeries.push(u);
+                     bandSeries.push(l);
+                 }
+            }
+            
+            // Update bands
+            bar.bands.forEach((b, i) => {
+                const uSeries = bandSeries[i * 2];
+                const lSeries = bandSeries[i * 2 + 1];
+                if (uSeries) uSeries.update({ time: time, value: b.upper });
+                if (lSeries) lSeries.update({ time: time, value: b.lower });
+            });
+
+            // 3. Volume
+            mt5VolSeries.update({ time: time, value: bar.mt5.vol });
+            okxVolSeries.update({ time: time, value: bar.okx.vol });
+        }
+
+        connect();
+    </script>
+</body>
+</html>

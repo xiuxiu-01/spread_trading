@@ -1,0 +1,9 @@
+ccxt==3.0.102
+TA-Lib==0.4.24; platform_system != 'Windows'
+MetaTrader5==5.0.5488
+pandas==2.2.3
+numpy==1.26.4
+python-dotenv==1.0.0
+websocket-client==1.8.0
+matplotlib==3.8.4
+websockets

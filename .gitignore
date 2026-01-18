@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Node
+node_modules/
+.pnpm-store/
+dist/
+build/
+.next/
+out/
+
+# Logs
+*.log
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Env files / secrets
+.env
+.env.*
+
+# Runtime data
+*.sqlite
+*.db
+
+# Project-specific
+mt5_xau_price.json
+mt5_cmd.json
+ticks.jsonl
