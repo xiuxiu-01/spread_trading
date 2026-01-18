@@ -3,7 +3,7 @@ import sys
 import json
 import time
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -280,7 +280,39 @@ async def http_ws(request):
     ws = web.WebSocketResponse()
     await ws.prepare(request)
     clients.add(ws)
+
+    # Send initial parameters
     await ws.send_json({ 'type': 'params', 'payload': params })
+
+    # Send historical data immediately upon connection
+    try:
+        mt5_gateway = MT5Gateway(SYMBOL_MT5)
+        okx_gateway = OKXGateway(SYMBOL_OKX)
+        end_time = datetime.now(timezone.utc)
+        start_time = end_time - timedelta(days=2)  # Fetch last 2 days of data
+
+        # Convert timezone-aware datetime to naive UTC datetime
+        start_time = start_time.replace(tzinfo=None)
+        end_time = end_time.replace(tzinfo=None)
+
+        # Fetch MT5 historical data
+        mt5_hist = mt5_gateway.get_historical_data(start_time, end_time, tz='UTC')
+
+        # Fetch OKX historical data
+        okx_hist = okx_gateway.get_historical_data(start_time, end_time)
+
+        # Send historical data to the client
+        await ws.send_json({
+            'type': 'history',
+            'payload': {
+                'ts': [bar['time'] for bar in mt5_hist],
+                'mt5': mt5_hist,
+                'okx': okx_hist,
+            }
+        })
+    except Exception as e:
+        print(f"Failed to send historical data: {e}")
+
     try:
         async for message in ws:
             if message.type == web.WSMsgType.TEXT:
@@ -346,6 +378,37 @@ async def main_async():
             print(f"Bootstrapped MT5 history: {len(mt5_hist)} bars")
     except Exception as e:
         print(f"Bootstrap history failed: {e}")
+
+    # Fetch historical data from MT5 and OKX
+    mt5_gateway = MT5Gateway(SYMBOL_MT5)
+    okx_gateway = OKXGateway(SYMBOL_OKX)
+    try:
+        end_time = datetime.now(timezone.utc)
+        start_time = end_time - timedelta(days=2)  # Fetch last 2 days of data
+
+        # Convert timezone-aware datetime to naive UTC datetime
+        start_time = start_time.replace(tzinfo=None)
+        end_time = end_time.replace(tzinfo=None)
+
+        # Fetch MT5 historical data
+        mt5_hist = mt5_gateway.get_historical_data(start_time, end_time, tz='UTC')
+
+        # Fetch OKX historical data
+        okx_hist = okx_gateway.get_historical_data(start_time, end_time)
+
+        # Broadcast to UI: historical candles (MT5 and OKX)
+        asyncio.create_task(broadcast({
+            'type': 'history',
+            'payload': {
+                'ts': [bar['time'] for bar in mt5_hist],
+                'mt5': mt5_hist,
+                'okx': okx_hist,
+            }
+        }))
+        print(f"Bootstrapped MT5 history: {len(mt5_hist)} bars")
+        print(f"Bootstrapped OKX history: {len(okx_hist)} bars")
+    except Exception as e:
+        print(f"Bootstrap history warning (non-fatal): {e}")
 
     feeder.start(loop)
 

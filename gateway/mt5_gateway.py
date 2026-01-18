@@ -5,6 +5,7 @@ load_dotenv()
 
 from datetime import datetime, timedelta, timezone
 from typing import List
+from pytz import timezone as pytz_timezone
 
 class MT5Gateway:
     """Unified MT5 gateway for market data and trading."""
@@ -136,4 +137,39 @@ class MT5Gateway:
                 'close': float(r['close']),
                 'vol': int(r.get('tick_volume', 0)),
             })
+        return out
+
+    def get_historical_data(self, start: datetime, end: datetime, tz: str = 'UTC') -> List[Dict[str, Any]]:
+        """Fetch historical minute data for the symbol, aligned to the specified timezone."""
+        
+        # Ensure input datetimes are naive UTC if they don't have timezone info (assuming caller provides UTC)
+        # or convert to UTC if they are aware.
+        def to_naive_utc(dt):
+            if dt.tzinfo:
+                return dt.astimezone(pytz_timezone('UTC')).replace(tzinfo=None)
+            return dt
+
+        start_naive = to_naive_utc(start)
+        end_naive = to_naive_utc(end)
+
+        rates = mt5.copy_rates_range(self.symbol, mt5.TIMEFRAME_M1, start_naive, end_naive)
+        
+        if rates is None:
+            # Not raising error, return empty list to be safe
+            print(f"Warning: Failed to fetch MT5 historical data: {mt5.last_error()}")
+            return []
+
+        out = []
+        for r in rates:
+            # Convert timestamp to seconds
+            # Explicitly cast numpy types to standard python types for JSON serialization
+            out.append({
+                'time': int(r['time']), # Assuming this is Unix timestamp in seconds
+                'open': float(r['open']),
+                'high': float(r['high']),
+                'low': float(r['low']),
+                'close': float(r['close']),
+                'volume': float(r['tick_volume']),
+            })
+            
         return out

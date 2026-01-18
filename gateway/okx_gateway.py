@@ -2,6 +2,7 @@ import os
 import ccxt
 from typing import Optional, Dict, Any
 from dotenv import load_dotenv
+from datetime import datetime
 
 load_dotenv()
 
@@ -47,6 +48,69 @@ class OKXGateway:
         t = self.client.fetch_ticker(self.symbol)
         last = float(t['last']) if t and t.get('last') else None
         return {'last': last, 'raw': t}
+
+    def get_historical_data(self, start: datetime, end: datetime) -> list:
+        """Fetch historical 1-minute OHLCV data from OKX with pagination."""
+        try:
+            # Ensure naive UTC timestamps
+            if start.tzinfo:
+                start = start.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+            if end.tzinfo:
+                end = end.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+            
+            start_ts = int(start.timestamp() * 1000)
+            end_ts = int(end.timestamp() * 1000)
+            
+            all_data = []
+            
+            # OKX limit per request (usually 100 for candles)
+            LIMIT = 100
+            
+            current_since = start_ts
+            
+            while current_since < end_ts:
+                # Fetch batch
+                ohlcv = self.client.fetch_ohlcv(self.symbol, timeframe='1m', since=current_since, limit=LIMIT)
+                
+                if not ohlcv:
+                    break
+                    
+                for entry in ohlcv:
+                    ts = entry[0]
+                    # Filter out any data beyond end_time
+                    if ts > end_ts:
+                        continue
+                        
+                    all_data.append({
+                        'time': ts / 1000, # Convert to seconds for consistency
+                        'open': float(entry[1]),
+                        'high': float(entry[2]),
+                        'low': float(entry[3]),
+                        'close': float(entry[4]),
+                        'volume': float(entry[5]),
+                    })
+                
+                # Update cursor
+                last_ts = ohlcv[-1][0]
+                if last_ts <= current_since:
+                   # Prevent infinite loop if exchange returns same data
+                   current_since += 60 * 1000 * LIMIT 
+                else:
+                    current_since = last_ts + 1  # Move past the last record
+
+                # Rate limit protection
+                import time
+                time.sleep(0.1)
+
+            return all_data
+            
+        except ccxt.NetworkError as e:
+            print(f"[OKXGateway] Network error: {e}")
+        except ccxt.ExchangeError as e:
+            print(f"[OKXGateway] Exchange error: {e}")
+        except Exception as e:
+            print(f"[OKXGateway] Unexpected error: {e}")
+        return []
 
     # WS streaming
     def start_ws(self, record_file: Optional[str] = None) -> None:

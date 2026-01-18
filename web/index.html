@@ -392,7 +392,93 @@
                 updateParamsUI(msg.payload);
             } else if (msg.type === 'bar') {
                updateCharts(msg.payload);
+            } else if (msg.type === 'history') {
+                loadHistory(msg.payload);
             }
+        }
+
+        // Format of history payload: { ts: [time1, time2...], mt5: [candle1...], okx: [candle2...] }
+        // Each candle: { time, open, high, low, close, vol }
+        function loadHistory(history) {
+            console.log('Received history:', history);
+            
+            const mt5Data = history.mt5.map(c => ({
+                time: c.time,
+                open: c.open,
+                high: c.high,
+                low: c.low,
+                close: c.close
+            }));
+            
+            const okxData = history.okx.map(c => ({
+                time: c.time,
+                open: c.open,
+                high: c.high,
+                low: c.low,
+                close: c.close
+            }));
+
+            // sort by time just in case
+            mt5Data.sort((a,b) => a.time - b.time);
+            okxData.sort((a,b) => a.time - b.time);
+
+            mt5Series.setData(mt5Data);
+            okxSeries.setData(okxData);
+            
+            const mt5VolData = history.mt5.map(c => ({
+                 time: c.time,
+                 value: c.volume,
+                 color: (c.close >= c.open) ? '#26a69a' : '#ef5350'
+            }));
+             const okxVolData = history.okx.map(c => ({
+                 time: c.time,
+                 value: c.volume,
+                 color: (c.close >= c.open) ? '#4caf50' : '#ef5350'
+            }));
+            
+            mt5VolSeries.setData(mt5VolData);
+            okxVolSeries.setData(okxVolData);
+            
+            // Reconstruct spread and EMA history roughly
+            // We need joined data for this.
+            // Create a map of time -> okx candle
+            const okxMap = new Map();
+            okxData.forEach(c => okxMap.set(c.time, c));
+            
+            const spreadData = [];
+            
+            // Iterate MT5 and find matching OKX
+            mt5Data.forEach(m => {
+                const o = okxMap.get(m.time);
+                if (o) {
+                    spreadData.push({
+                        time: m.time,
+                        value: m.close - o.close
+                    });
+                }
+            });
+            
+            if (spreadData.length > 0) {
+                spreadSeries.setData(spreadData);
+                
+                // Calculate simplistic EMA locally for display
+                // Backend sends parameters, we can use the default or current one
+                const period = currentParams.emaPeriod || 60; 
+                const emaData = calculateEMA(spreadData, period);
+                emaSeries.setData(emaData);
+            }
+            
+            // Adjust scale to fit
+            priceChart.timeScale().fitContent();
+        }
+
+        function calculateEMA(data, period) {
+             const k = 2 / (period + 1);
+             let ema = data[0].value;
+             return data.map(d => {
+                 ema = d.value * k + ema * (1 - k);
+                 return { time: d.time, value: ema };
+             });
         }
 
         function updateParamsUI(params) {
