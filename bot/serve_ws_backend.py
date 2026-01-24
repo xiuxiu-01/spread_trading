@@ -156,6 +156,8 @@ class Aggregator:
 
             # Ensure we have valid prices to calc spread
             if c_mt5['close'] > 0 and c_okx['close'] > 0:
+                # Ensure timestamp is ISO format with timezone info if possible, or naive UTC
+                # self.last_minute is now UTC-aware from datetime.now(timezone.utc)
                 self.times.append(self.last_minute.isoformat())
                 self.mt5_stats.append(c_mt5)
                 self.okx_stats.append(c_okx)
@@ -201,7 +203,8 @@ class Feeder:
             try:
                 for tick in self.mt5.stream_ticks():
                     bid = tick.get('bid'); ask = tick.get('ask')
-                    ts = datetime.now()
+                    # Use UTC explicitly to avoid server local time issues
+                    ts = datetime.now(timezone.utc)
                     bar = self.agg.on_mt5_tick(bid, ask, ts)
                     if bar:
                         asyncio.run_coroutine_threadsafe(broadcast({'type': 'bar', 'payload': self._decorate_bar(bar)}), loop)
@@ -219,7 +222,8 @@ class Feeder:
                     asks = ob.get('asks') or []
                     if bids and asks:
                         best_bid = bids[0][0]; best_ask = asks[0][0]
-                        ts = datetime.now()
+                        # Use UTC explicitly
+                        ts = datetime.now(timezone.utc)
                         bar = self.agg.on_okx_tick(best_bid, best_ask, ts)
                         if bar:
                             asyncio.run_coroutine_threadsafe(broadcast({'type': 'bar', 'payload': self._decorate_bar(bar)}), loop)
@@ -390,11 +394,36 @@ async def main_async():
         start_time = start_time.replace(tzinfo=None)
         end_time = end_time.replace(tzinfo=None)
 
+        # Ensure proper casting for JSON serialization
+        def clean_hist(hist_list):
+             cleaned = []
+             for item in hist_list:
+                 # Ensure time is UNIX timestamp (seconds)
+                 # If 'time' is missing but 'ts' exists (from fetch_ohlcv_1m), convert it
+                 if 'time' not in item and 'ts' in item:
+                     dt = datetime.fromisoformat(item['ts'])
+                     # Ensure dt is UTC before stripping
+                     if dt.tzinfo:
+                         dt = dt.astimezone(timezone.utc)
+                     item['time'] = int(dt.timestamp())
+                 
+                 cleaned.append(item)
+             return cleaned
+
         # Fetch MT5 historical data
-        mt5_hist = mt5_gateway.get_historical_data(start_time, end_time, tz='UTC')
+        mt5_hist_raw = mt5_gateway.get_historical_data(start_time, end_time, tz='UTC')
+        mt5_hist = clean_hist(mt5_hist_raw)
 
         # Fetch OKX historical data
-        okx_hist = okx_gateway.get_historical_data(start_time, end_time)
+        okx_hist_raw = okx_gateway.get_historical_data(start_time, end_time)
+        okx_hist = clean_hist(okx_hist_raw)
+
+        # Debug: Print last timestamps to verify alignment
+        if mt5_hist and okx_hist:
+            last_mt5 = datetime.fromtimestamp(mt5_hist[-1]['time'], timezone.utc)
+            last_okx = datetime.fromtimestamp(okx_hist[-1]['time'], timezone.utc)
+            print(f"DEBUG Alignment: MT5 Last={last_mt5} | OKX Last={last_okx}")
+            print(f"DEBUG: Ensure MT5_UTC_OFFSET_HOURS in .env matches your broker (e.g. 8 for CST)")
 
         # Broadcast to UI: historical candles (MT5 and OKX)
         asyncio.create_task(broadcast({

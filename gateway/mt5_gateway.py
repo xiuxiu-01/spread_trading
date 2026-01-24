@@ -113,12 +113,23 @@ class MT5Gateway:
         - end: server-time end (naive datetime). Defaults to server_now().
 
         Returns list of dicts: {ts, open, high, low, close, vol}
-        where ts is ISO string (server time) at bar open.
+        where ts is ISO string (UTC) at bar open. (Corrected from server time)
         """
         if minutes <= 0:
             return []
+        
+        # Get offset for collection adjustment
+        import os
+        env_offset = os.getenv('MT5_UTC_OFFSET_HOURS')
+        if env_offset is not None:
+             offset_hours = float(env_offset)
+        else:
+             offset_hours = self._estimate_server_offset()
+        offset_delta = timedelta(hours=offset_hours)
 
-        end_server = end or self.server_now()
+        # "end" parameter is usually assumed to be server time if passed, or now()
+        # But for consistency, let's work backwards from "now"
+        end_server = end or (datetime.utcnow() + offset_delta)
         start_server = end_server - timedelta(minutes=int(minutes))
 
         rates = mt5.copy_rates_range(self.symbol, mt5.TIMEFRAME_M1, start_server, end_server)
@@ -127,10 +138,16 @@ class MT5Gateway:
 
         out: List[Dict[str, Any]] = []
         for r in rates:
-            # r['time'] is epoch seconds; interpret as server-local timestamp.
-            ts = datetime.fromtimestamp(int(r['time'])).replace(second=0, microsecond=0)
+            # r['time'] is epoch seconds in server time.
+            # We want to output UTC ISO string.
+            server_ts_int = int(r['time'])
+            # Convert server timestamp to UTC timestamp
+            utc_ts_int = server_ts_int - int(offset_hours * 3600)
+            
+            ts_utc = datetime.utcfromtimestamp(utc_ts_int).replace(second=0, microsecond=0)
+            
             out.append({
-                'ts': ts.isoformat(),
+                'ts': ts_utc.replace(tzinfo=timezone.utc).isoformat(), # Explicitly UTC aware
                 'open': float(r['open']),
                 'high': float(r['high']),
                 'low': float(r['low']),
@@ -139,11 +156,47 @@ class MT5Gateway:
             })
         return out
 
+    def _estimate_server_offset(self) -> float:
+        """Estimate the server offset in hours based on current tick vs UTC time."""
+        tick = mt5.symbol_info_tick(self.symbol)
+        if tick is None:
+            return 0.0
+        
+        # Current UTC time
+        now_utc = datetime.now(timezone.utc).timestamp()
+        
+        # Tick time (server time in seconds)
+        tick_ts = float(tick.time)
+        
+        diff_seconds = tick_ts - now_utc
+        
+        # If the tick is older than 10 minutes, market might be closed or low liquidity. 
+        # Trusting the offset calc is risky if the gap is large (e.g. weekend).
+        if abs(diff_seconds) > 3600 * 10: # > 10 hours discrepancy usually means old tick
+            print(f"[MT5] Warning: Last tick is old ({int(diff_seconds/3600)}h ago). Cannot auto-detect timezone offset safely. Defaulting to 0. Set MT5_UTC_OFFSET_HOURS in .env to fix.")
+            return 0.0
+            
+        # Round to nearest half-hour
+        hours = round(diff_seconds / 1800) / 2.0
+        
+        print(f"[MT5] Auto-detected server offset: {hours} hours (based on tick delay {diff_seconds:.1f}s)")
+        return hours
+
     def get_historical_data(self, start: datetime, end: datetime, tz: str = 'UTC') -> List[Dict[str, Any]]:
         """Fetch historical minute data for the symbol, aligned to the specified timezone."""
         
-        # Ensure input datetimes are naive UTC if they don't have timezone info (assuming caller provides UTC)
-        # or convert to UTC if they are aware.
+        # Get configured UTC offset for MT5 server
+        import os
+        env_offset = os.getenv('MT5_UTC_OFFSET_HOURS')
+        
+        if env_offset is not None:
+             offset_hours = float(env_offset)
+        else:
+             offset_hours = self._estimate_server_offset()
+             
+        offset_delta = timedelta(hours=offset_hours)
+
+        # Ensure input datetimes are naive UTC
         def to_naive_utc(dt):
             if dt.tzinfo:
                 return dt.astimezone(pytz_timezone('UTC')).replace(tzinfo=None)
@@ -152,7 +205,12 @@ class MT5Gateway:
         start_naive = to_naive_utc(start)
         end_naive = to_naive_utc(end)
 
-        rates = mt5.copy_rates_range(self.symbol, mt5.TIMEFRAME_M1, start_naive, end_naive)
+        # Adjust query times to Server Time
+        # If we want 10:00 UTC and server is +2, we ask for 12:00 Server
+        start_server = start_naive + offset_delta
+        end_server = end_naive + offset_delta
+
+        rates = mt5.copy_rates_range(self.symbol, mt5.TIMEFRAME_M1, start_server, end_server)
         
         if rates is None:
             # Not raising error, return empty list to be safe
@@ -160,11 +218,18 @@ class MT5Gateway:
             return []
 
         out = []
+        # Pre-calc offset in seconds for adjustment back to UTC
+        offset_seconds = int(offset_hours * 3600)
+
         for r in rates:
-            # Convert timestamp to seconds
+            # r['time'] is Server Time (e.g. 12:00 for a 10:00 UTC bar).
+            # We want to return UTC timestamp (10:00).
+            server_ts = int(r['time'])
+            utc_ts = server_ts - offset_seconds
+
             # Explicitly cast numpy types to standard python types for JSON serialization
             out.append({
-                'time': int(r['time']), # Assuming this is Unix timestamp in seconds
+                'time': utc_ts, 
                 'open': float(r['open']),
                 'high': float(r['high']),
                 'low': float(r['low']),
