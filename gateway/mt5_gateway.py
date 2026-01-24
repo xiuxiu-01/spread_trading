@@ -238,3 +238,30 @@ class MT5Gateway:
             })
             
         return out
+
+    def is_market_open(self) -> bool:
+        """Check if the market (Forex/Metals) is currently open in UTC time."""
+        # Forex Market Hours (approximate):
+        # Opens: Sunday 22:00 UTC (Sydney open)
+        # Closes: Friday 22:00 UTC (New York close)
+        # However, many brokers close 21:00 or 22:00 UTC Friday and open 21:00 or 22:00 UTC Sunday.
+        # Safe strict window: Mon 00:00 UTC to Fri 21:00 UTC.
+        
+        # Checking current UTC time
+        now = datetime.now(timezone.utc)
+        weekday = now.weekday() # Mon=0, Sun=6
+        hour = now.hour
+        
+        # Friday: Close after 21:00 UTC (buffer for market close)
+        if weekday == 4 and hour >= 21:
+            return False
+            
+        # Saturday: Closed
+        if weekday == 5:
+            return False
+            
+        # Sunday: Closed before 22:00 UTC (buffer for market open)
+        if weekday == 6 and hour < 22:
+            return False
+            
+        return True

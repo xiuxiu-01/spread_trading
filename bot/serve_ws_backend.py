@@ -21,6 +21,11 @@ from aiohttp import web
 
 load_dotenv()
 
+# Persistence configuration
+DATA_DIR = os.path.join(ROOT, 'data')
+os.makedirs(DATA_DIR, exist_ok=True)
+HISTORY_FILE = os.path.join(DATA_DIR, 'history.jsonl')
+
 EMA_PERIOD = int(os.getenv('EMA_PERIOD', '60'))
 FIRST_SPREAD = float(os.getenv('FIRST_SPREAD', '3.0'))
 NEXT_SPREAD = float(os.getenv('NEXT_SPREAD', '1.0'))
@@ -99,6 +104,139 @@ class Aggregator:
         self.spreads = []
         self.ema = []
 
+    def load_from_file(self):
+        if not os.path.exists(HISTORY_FILE):
+            return
+        print(f"Loading history from {HISTORY_FILE}...")
+        try:
+            with open(HISTORY_FILE, 'r') as f:
+                count = 0
+                for line in f:
+                    if not line.strip(): continue
+                    try:
+                        data = json.loads(line)
+                        self.times.append(data['ts'])
+                        self.mt5_stats.append(data['mt5'])
+                        self.okx_stats.append(data['okx'])
+                        self.spreads.append(data['spread'])
+                        self.ema.append(data['ema'])
+                        count += 1
+                    except Exception as loop_e:
+                        print(f"Skipping corrupt line: {loop_e}")
+            if self.times:
+                print(f"Loaded {count} bars. Last: {self.times[-1]}")
+        except Exception as e:
+            print(f"Error loading history: {e}")
+
+    def save_bar(self, bar):
+        try:
+            with open(HISTORY_FILE, 'a') as f:
+                f.write(json.dumps(bar) + '\n')
+        except Exception as e:
+            print(f"Error saving bar: {e}")
+
+    def rewrite_file(self):
+        try:
+            with open(HISTORY_FILE, 'w') as f:
+                for i in range(len(self.times)):
+                    row = {
+                        'ts': self.times[i],
+                        'mt5': self.mt5_stats[i],
+                        'okx': self.okx_stats[i],
+                        'spread': self.spreads[i],
+                        'ema': self.ema[i]
+                    }
+                    f.write(json.dumps(row) + '\n')
+            print(f"Rewrote history file with {len(self.times)} records.")
+        except Exception as e:
+            print(f"Error rewriting file: {e}")
+
+    def get_last_timestamp(self) -> datetime:
+        if not self.times:
+            return None
+        return datetime.fromisoformat(self.times[-1])
+
+    def merge_external_history(self, mt5_hist, okx_hist):
+        def clean_candle(c):
+            vol = c.get('vol') if 'vol' in c else c.get('volume', 0)
+            return {
+                'open': float(c['open']),
+                'high': float(c['high']),
+                'low': float(c['low']),
+                'close': float(c['close']),
+                'vol': int(vol)
+            }
+
+        existing = {}
+        for i, t_str in enumerate(self.times):
+            dt = datetime.fromisoformat(t_str)
+            ts = int(dt.timestamp())
+            existing[ts] = {
+                'mt5': self.mt5_stats[i],
+                'okx': self.okx_stats[i]
+            }
+
+        new_mt5 = {x['time']: clean_candle(x) for x in mt5_hist}
+        new_okx = {x['time']: clean_candle(x) for x in okx_hist}
+
+        all_ts = sorted(list(set(existing.keys()) | set(new_mt5.keys()) | set(new_okx.keys())))
+        
+        self.times = []
+        self.mt5_stats = []
+        self.okx_stats = []
+        self.spreads = []
+        self.ema = []
+
+        for ts in all_ts:
+            if ts in new_mt5:
+                c_mt5 = new_mt5[ts]
+            elif ts in existing:
+                c_mt5 = existing[ts]['mt5']
+            else:
+                continue
+
+            if ts in new_okx:
+                c_okx = new_okx[ts]
+            elif ts in existing:
+                c_okx = existing[ts]['okx']
+            else:
+                continue 
+
+            dt_iso = datetime.fromtimestamp(ts, timezone.utc).isoformat()
+            self.times.append(dt_iso)
+            self.mt5_stats.append(c_mt5)
+            self.okx_stats.append(c_okx)
+            
+            spread = c_mt5['close'] - c_okx['close']
+            self.spreads.append(spread)
+        
+        self.ema = compute_ema(self.spreads, self.ema_period)
+        self.rewrite_file()
+
+    def get_history_payload(self):
+        ts_ints = []
+        mt5_out = []
+        okx_out = []
+        
+        for i, t_str in enumerate(self.times):
+            dt = datetime.fromisoformat(t_str)
+            ts_val = int(dt.timestamp())
+            ts_ints.append(ts_val)
+            
+            m = self.mt5_stats[i].copy()
+            m['time'] = ts_val
+            mt5_out.append(m)
+            
+            o = self.okx_stats[i].copy()
+            o['time'] = ts_val
+            okx_out.append(o)
+            
+        return {
+            'ts': ts_ints,
+            'mt5': mt5_out,
+            'okx': okx_out,
+        }
+
     def _sanitize_mid(self, v):
         try:
             if v is None:
@@ -142,10 +280,6 @@ class Aggregator:
             self.last_minute = minute
             return None
         if minute != self.last_minute:
-            # Emit bar
-            # Logic: If no data for this minute, clone the last close as O=H=L=C, vol=0
-            
-            # Helper to finalize candle
             def finalize(buf, last_close):
                 if buf: return buf
                 p = last_close if last_close is not None else 0.0
@@ -154,10 +288,7 @@ class Aggregator:
             c_mt5 = finalize(self.buf_mt5, self.last_mt5_close)
             c_okx = finalize(self.buf_okx, self.last_okx_close)
 
-            # Ensure we have valid prices to calc spread
             if c_mt5['close'] > 0 and c_okx['close'] > 0:
-                # Ensure timestamp is ISO format with timezone info if possible, or naive UTC
-                # self.last_minute is now UTC-aware from datetime.now(timezone.utc)
                 self.times.append(self.last_minute.isoformat())
                 self.mt5_stats.append(c_mt5)
                 self.okx_stats.append(c_okx)
@@ -168,6 +299,12 @@ class Aggregator:
                 print(f"Emitting bar: {self.last_minute} Spread: {spread:.2f} Vol: MT5={c_mt5['vol']} OKX={c_okx['vol']}")
             else:
                 print(f"Skipping bar: {self.last_minute} (Missing data)")
+                # If skipping, we must NOT return a bar to be saved or broadcasted
+                # Update last_minute and clear buffers, but return None early
+                self.last_minute = minute
+                self.buf_mt5 = None
+                self.buf_okx = None
+                return None
 
             self.last_minute = minute
             self.buf_mt5 = None
@@ -195,6 +332,7 @@ class Feeder:
             pass
         self.mt5 = MT5Gateway(symbol=SYMBOL_MT5)
         self.agg = Aggregator(EMA_PERIOD)
+        self.last_resync_time = 0
 
     def start(self, loop):
         # MT5 ticks
@@ -202,17 +340,20 @@ class Feeder:
             print("MT5 Thread started") 
             try:
                 for tick in self.mt5.stream_ticks():
+                    # Check market hours
+                    if not self.mt5.is_market_open():
+                         continue
+                    
                     bid = tick.get('bid'); ask = tick.get('ask')
-                    # Use UTC explicitly to avoid server local time issues
                     ts = datetime.now(timezone.utc)
                     bar = self.agg.on_mt5_tick(bid, ask, ts)
                     if bar:
+                        self.agg.save_bar(bar)
                         asyncio.run_coroutine_threadsafe(broadcast({'type': 'bar', 'payload': self._decorate_bar(bar)}), loop)
             except Exception as e:
                 print(f"MT5 Thread loop error: {e}")
         threading.Thread(target=mt5_thread, daemon=True).start()
 
-        # OKX ws -> best bid/ask
         def okx_thread():
             print("OKX Thread started")
             while True:
@@ -222,19 +363,87 @@ class Feeder:
                     asks = ob.get('asks') or []
                     if bids and asks:
                         best_bid = bids[0][0]; best_ask = asks[0][0]
-                        # Use UTC explicitly
                         ts = datetime.now(timezone.utc)
                         bar = self.agg.on_okx_tick(best_bid, best_ask, ts)
                         if bar:
+                            self.agg.save_bar(bar)
                             asyncio.run_coroutine_threadsafe(broadcast({'type': 'bar', 'payload': self._decorate_bar(bar)}), loop)
-                    time.sleep(0.5) # slow down slightly to match mt5 poll roughly
+                    time.sleep(0.5)
                 except Exception as e:
                     print(f"OKX Thread loop error: {e}")
                     time.sleep(1)
         threading.Thread(target=okx_thread, daemon=True).start()
 
+    async def run_scheduler(self):
+        """Monitor market open/close and trigger resync."""
+        print("Scheduler started (Market Monitor)")
+        
+        while True:
+            try:
+                now = datetime.now(timezone.utc)
+                is_open = self.mt5.is_market_open()
+                
+                is_sunday = (now.weekday() == 6)
+                is_pre_open = (is_sunday and now.hour == 21 and now.minute >= 55)
+                
+                time_since_last = time.time() - self.last_resync_time
+                
+                if (is_pre_open or is_open) and time_since_last > 3600 * 4: 
+                     if is_pre_open or (is_open and time_since_last > 3600 * 24 * 2): 
+                        print("Scheduled Resync triggering...")
+                        await self.do_resync()
+                        self.last_resync_time = time.time()
+                
+                await asyncio.sleep(60)
+            except Exception as e:
+                print(f"Scheduler error: {e}", file=sys.stderr)
+                await asyncio.sleep(60)
+
+    async def do_resync(self):
+         print("Performing scheduled history synchronization...")
+         
+         last_ts = self.agg.get_last_timestamp()
+         if not last_ts:
+             return 
+             
+         start_time = last_ts + timedelta(minutes=1)
+         end_time = datetime.now(timezone.utc)
+         
+         if start_time >= end_time:
+             print("Data is up to date.")
+             return
+             
+         print(f"Syncing gap: {start_time} to {end_time}")
+         
+         loop = asyncio.get_running_loop()
+         try:
+            mt5_gw = MT5Gateway(SYMBOL_MT5)
+            okx_gw = OKXGateway(SYMBOL_OKX)
+            
+            def fetch_job():
+                start_naive = start_time.replace(tzinfo=None)
+                end_naive = end_time.replace(tzinfo=None)
+                
+                m = mt5_gw.get_historical_data(start_naive, end_naive, tz='UTC')
+                o = okx_gw.get_historical_data(start_naive, end_naive)
+                
+                def clean(arr):
+                    for x in arr:
+                        if 'time' not in x and 'ts' in x: 
+                             pass 
+                    return arr
+                return m, o
+
+            mt5_hist, okx_hist = await loop.run_in_executor(None, fetch_job)
+            
+            if mt5_hist or okx_hist:
+                self.agg.merge_external_history(mt5_hist, okx_hist)
+                print(f"Resynced {len(mt5_hist)} MT5 and {len(okx_hist)} OKX bars.")
+            
+         except Exception as e:
+             print(f"Resync failed: {e}")
+
     def _decorate_bar(self, bar):
-        # bands based on current params
         ema = bar['ema']
         bands = []
         for lvl in range(1, params['maxPos'] + 1):
@@ -245,7 +454,6 @@ class Feeder:
 
 feeder = None
 
-# Original websockets handler preserved for compatibility
 async def handler(ws, path):
     clients.add(ws)
     await ws.send(json.dumps({ 'type': 'params', 'payload': params }))
@@ -262,12 +470,10 @@ async def handler(ws, path):
     finally:
         clients.discard(ws)
 
-# New: aiohttp app serving index.html and bridging to websockets handler
 async def http_index(request):
     index_path = os.path.join(ROOT, 'web', 'index.html')
     return web.FileResponse(index_path)
 
-# Serve local Chart.js if available to avoid CDN issues
 async def http_chart(request):
     path = os.path.join(ROOT, 'web', 'chart.umd.js')
     if os.path.exists(path):
@@ -285,37 +491,19 @@ async def http_ws(request):
     await ws.prepare(request)
     clients.add(ws)
 
-    # Send initial parameters
     await ws.send_json({ 'type': 'params', 'payload': params })
 
-    # Send historical data immediately upon connection
-    try:
-        mt5_gateway = MT5Gateway(SYMBOL_MT5)
-        okx_gateway = OKXGateway(SYMBOL_OKX)
-        end_time = datetime.now(timezone.utc)
-        start_time = end_time - timedelta(days=2)  # Fetch last 2 days of data
-
-        # Convert timezone-aware datetime to naive UTC datetime
-        start_time = start_time.replace(tzinfo=None)
-        end_time = end_time.replace(tzinfo=None)
-
-        # Fetch MT5 historical data
-        mt5_hist = mt5_gateway.get_historical_data(start_time, end_time, tz='UTC')
-
-        # Fetch OKX historical data
-        okx_hist = okx_gateway.get_historical_data(start_time, end_time)
-
-        # Send historical data to the client
-        await ws.send_json({
-            'type': 'history',
-            'payload': {
-                'ts': [bar['time'] for bar in mt5_hist],
-                'mt5': mt5_hist,
-                'okx': okx_hist,
-            }
-        })
-    except Exception as e:
-        print(f"Failed to send historical data: {e}")
+    if feeder and feeder.agg:
+        try:
+            hist_payload = feeder.agg.get_history_payload()
+            await ws.send_json({
+                'type': 'history',
+                'payload': hist_payload
+            })
+        except Exception as e:
+            print(f"Failed to send memory history: {e}")
+    else:
+        print("Feeder not ready, skipping history")
 
     try:
         async for message in ws:
@@ -325,10 +513,8 @@ async def http_ws(request):
                     if msg.get('type') == 'params':
                         payload = msg.get('payload') or {}
                         params.update(payload)
-                        # update aggregator period if changed
                         if feeder and 'emaPeriod' in payload:
                             feeder.agg.ema_period = int(payload['emaPeriod'])
-                        # broadcast new params
                         await broadcast({ 'type': 'params', 'payload': params })
                 except Exception as e:
                     print('http ws msg err', e)
@@ -343,105 +529,60 @@ async def main_async():
     loop = asyncio.get_event_loop()
     feeder = Feeder()
 
-    # --- NEW: bootstrap with MT5 historical 1m bars (server time) ---
-    try:
-        hist_minutes = int(os.getenv('BOOTSTRAP_MINUTES', str(max(EMA_PERIOD * 5, 500))))
-        mt5_hist = feeder.mt5.fetch_ohlcv_1m(minutes=hist_minutes)
-        if mt5_hist:
-            # Seed aggregator state so EMA/spread start with context
-            for bar in mt5_hist:
-                ts = datetime.fromisoformat(bar['ts'])
-                feeder.agg.times.append(bar['ts'])
-                feeder.agg.mt5_stats.append({
-                    'open': bar['open'],
-                    'high': bar['high'],
-                    'low': bar['low'],
-                    'close': bar['close'],
-                    'vol': bar.get('vol', 0),
-                })
-                # OKX history is optional; initialize with MT5 close so spread starts at 0 until OKX catches up
-                c = float(bar['close'])
-                feeder.agg.okx_stats.append({
-                    'open': c,
-                    'high': c,
-                    'low': c,
-                    'close': c,
-                    'vol': 0,
-                })
-                feeder.agg.spreads.append(0.0)
-            feeder.agg.ema = compute_ema(feeder.agg.spreads, feeder.agg.ema_period)
+    feeder.agg.load_from_file()
 
-            # Broadcast to UI: historical candles (mt5 only + ts)
-            asyncio.create_task(broadcast({
-                'type': 'history',
-                'payload': {
-                    'ts': [b['ts'] for b in mt5_hist],
-                    'mt5': mt5_hist,
-                }
-            }))
-            print(f"Bootstrapped MT5 history: {len(mt5_hist)} bars")
-    except Exception as e:
-        print(f"Bootstrap history failed: {e}")
+    last_file_ts = feeder.agg.get_last_timestamp()
+    
+    end_time = datetime.now(timezone.utc) + timedelta(hours=8)
+    
+    if last_file_ts:
+        start_time = last_file_ts + timedelta(minutes=1)
+        if start_time > datetime.now(timezone.utc):
+            print("Local data is up to date.")
+            start_time = None
+        else:
+            print(f"Gap detected. Fetching from {start_time}...")
+    else:
+        start_time = datetime.now(timezone.utc) - timedelta(days=2)
+        print("No local data. Fetching last 2 days...")
 
-    # Fetch historical data from MT5 and OKX
-    mt5_gateway = MT5Gateway(SYMBOL_MT5)
-    okx_gateway = OKXGateway(SYMBOL_OKX)
-    try:
-        end_time = datetime.now(timezone.utc)
-        start_time = end_time - timedelta(days=2)  # Fetch last 2 days of data
+    if start_time:
+        mt5_gateway = MT5Gateway(SYMBOL_MT5)
+        okx_gateway = OKXGateway(SYMBOL_OKX)
+        try:
+            start_naive = start_time.replace(tzinfo=None)
+            end_naive = end_time.replace(tzinfo=None)
 
-        # Convert timezone-aware datetime to naive UTC datetime
-        start_time = start_time.replace(tzinfo=None)
-        end_time = end_time.replace(tzinfo=None)
+            def clean_hist(hist_list):
+                 cleaned = []
+                 for item in hist_list:
+                     if 'time' not in item and 'ts' in item:
+                         dt = datetime.fromisoformat(item['ts'])
+                         if dt.tzinfo:
+                             dt = dt.astimezone(timezone.utc)
+                         item['time'] = int(dt.timestamp())
+                     cleaned.append(item)
+                 return cleaned
 
-        # Ensure proper casting for JSON serialization
-        def clean_hist(hist_list):
-             cleaned = []
-             for item in hist_list:
-                 # Ensure time is UNIX timestamp (seconds)
-                 # If 'time' is missing but 'ts' exists (from fetch_ohlcv_1m), convert it
-                 if 'time' not in item and 'ts' in item:
-                     dt = datetime.fromisoformat(item['ts'])
-                     # Ensure dt is UTC before stripping
-                     if dt.tzinfo:
-                         dt = dt.astimezone(timezone.utc)
-                     item['time'] = int(dt.timestamp())
-                 
-                 cleaned.append(item)
-             return cleaned
+            print(f"Fetching MT5 from {start_naive}...")
+            mt5_hist_raw = mt5_gateway.get_historical_data(start_naive, end_naive, tz='UTC')
+            mt5_hist = clean_hist(mt5_hist_raw)
 
-        # Fetch MT5 historical data
-        mt5_hist_raw = mt5_gateway.get_historical_data(start_time, end_time, tz='UTC')
-        mt5_hist = clean_hist(mt5_hist_raw)
+            print(f"Fetching OKX from {start_naive}...")
+            okx_hist_raw = okx_gateway.get_historical_data(start_naive, end_naive)
+            okx_hist = clean_hist(okx_hist_raw)
 
-        # Fetch OKX historical data
-        okx_hist_raw = okx_gateway.get_historical_data(start_time, end_time)
-        okx_hist = clean_hist(okx_hist_raw)
+            feeder.agg.merge_external_history(mt5_hist, okx_hist)
+            print(f"History synchronized. Total bars: {len(feeder.agg.times)}")
 
-        # Debug: Print last timestamps to verify alignment
-        if mt5_hist and okx_hist:
-            last_mt5 = datetime.fromtimestamp(mt5_hist[-1]['time'], timezone.utc)
-            last_okx = datetime.fromtimestamp(okx_hist[-1]['time'], timezone.utc)
-            print(f"DEBUG Alignment: MT5 Last={last_mt5} | OKX Last={last_okx}")
-            print(f"DEBUG: Ensure MT5_UTC_OFFSET_HOURS in .env matches your broker (e.g. 8 for CST)")
-
-        # Broadcast to UI: historical candles (MT5 and OKX)
-        asyncio.create_task(broadcast({
-            'type': 'history',
-            'payload': {
-                'ts': [bar['time'] for bar in mt5_hist],
-                'mt5': mt5_hist,
-                'okx': okx_hist,
-            }
-        }))
-        print(f"Bootstrapped MT5 history: {len(mt5_hist)} bars")
-        print(f"Bootstrapped OKX history: {len(okx_hist)} bars")
-    except Exception as e:
-        print(f"Bootstrap history warning (non-fatal): {e}")
+        except Exception as e:
+            print(f"Bootstrap history warning: {e}")
 
     feeder.start(loop)
+    
+    # Start scheduler
+    asyncio.create_task(feeder.run_scheduler())
 
-    # Start aiohttp app
     app = web.Application()
     app.router.add_get('/', http_index)
     app.router.add_get('/ws', http_ws)
@@ -454,7 +595,6 @@ async def main_async():
     await site.start()
     print('Frontend + WS on http://localhost:8765 (WS at /ws)')
 
-    # Keep running
     while True:
         await asyncio.sleep(3600)
 

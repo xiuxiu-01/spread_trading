@@ -190,7 +190,8 @@
                 textColor: '#c9d1d9',
                 background: { type: ColorType.Solid, color: '#161b22' },
             },
-            timezone: 'Asia/Shanghai', // Set chart timezone to China Standard Time
+           // timezone: 'Asia/Shanghai', // Set chart timezone to China Standard Time
+           timezone: 'Etc/UTC', // We are manually shifting data to Beijing Time (UTC+8) before feeding to chart
             grid: {
                 vertLines: { color: '#30363d' },
                 horzLines: { color: '#30363d' },
@@ -403,8 +404,11 @@
         function loadHistory(history) {
             console.log('Received history:', history);
             
+            // User request: Add 8 hours to historical time for correct display
+            const OFFSET_SECONDS = 8 * 3600;
+
             const mt5Data = history.mt5.map(c => ({
-                time: c.time,
+                time: c.time + OFFSET_SECONDS,
                 open: c.open,
                 high: c.high,
                 low: c.low,
@@ -412,7 +416,7 @@
             }));
             
             const okxData = history.okx.map(c => ({
-                time: c.time,
+                time: c.time + OFFSET_SECONDS,
                 open: c.open,
                 high: c.high,
                 low: c.low,
@@ -427,12 +431,12 @@
             okxSeries.setData(okxData);
             
             const mt5VolData = history.mt5.map(c => ({
-                 time: c.time,
+                 time: c.time + OFFSET_SECONDS,
                  value: c.volume,
                  color: (c.close >= c.open) ? '#26a69a' : '#ef5350'
             }));
              const okxVolData = history.okx.map(c => ({
-                 time: c.time,
+                 time: c.time + OFFSET_SECONDS,
                  value: c.volume,
                  color: (c.close >= c.open) ? '#4caf50' : '#ef5350'
             }));
@@ -450,6 +454,7 @@
             
             // Iterate MT5 and find matching OKX
             mt5Data.forEach(m => {
+                // Since we already shifted both, we can keys match directly
                 const o = okxMap.get(m.time);
                 if (o) {
                     spreadData.push({
@@ -523,11 +528,31 @@
         // Lightweight charts expects seconds (UNIX) or 'yyyy-mm-dd' string. 
         // For intraday, we need UNIX timestamp (seconds).
         function toTime(isoStr) {
+             // The backend sends ISO string in UTC or with offset.
+             // Lightweight charts with "timezone: 'Asia/Shanghai'" expects a UTC timestamp (seconds),
+             // and IT will apply the shift (UTC+8) when rendering the label.
+             // However, if we feed it a timestamp that is ALREADY shifted, and tell it to shift again, it might be double shifting or confusing.
+             
+             // NEW REQUIREMENT: User says "Historical time should add 8 hours to display correctly".
+             // This likely means the historical data is coming as UTC timestamp, and the chart is NOT adding 8 hours automatically,
+             // OR the chart IS adding 8 hours but the source data was somehow treated as local.
+             
+             // Let's standardise:
+             // 1. We receive UTC timestamp (seconds) or ISO string (UTC).
+             // 2. We want to DISPLAY Beijing Time.
+             
+             // If chart option timezone: 'Asia/Shanghai' is set, it takes a UTC timestamp and displays it as UTC+8.
+             // If the user says it's still missing 8 hours, it implies we might need to manually shift it if the library isn't doing what we expect for history.
+             
+             // BUT, modifying 'toTime' affects live updates too. Let's look at loadHistory.
+             
              return Math.floor(new Date(isoStr).getTime() / 1000); 
         }
 
         function updateCharts(bar) {
-            const time = toTime(bar.ts);
+            // Apply +8h offset to live data too, to match history
+            const OFFSET_SECONDS = 8 * 3600;
+            const time = toTime(bar.ts) + OFFSET_SECONDS;
             
             // 1. Price
             // MT5
