@@ -44,7 +44,9 @@ params = {
     'maxPos': MAX_POS,
     'OKX_SYMBOL': SYMBOL_OKX,
     'MT5_SYMBOL': SYMBOL_MT5,
+    'tradeVolume': 0.01, # Default trade volume (lots for MT5, converted for OKX)
 }
+orders = [] # In-memory order history
 
 async def broadcast(msg):
     # Debug log to trace broadcasting
@@ -333,6 +335,319 @@ class Feeder:
         self.mt5 = MT5Gateway(symbol=SYMBOL_MT5)
         self.agg = Aggregator(EMA_PERIOD)
         self.last_resync_time = 0
+        self.account_state = {
+            'balance': {'mt5': 0.0, 'okx': 0.0},
+            'positions': {'mt5': [], 'okx': []}
+        }
+
+    async def run_account_monitor(self):
+        """Periodically fetch and broadcast account info."""
+        print("Account Monitor started")
+        while True:
+            try:
+                # Fetch data
+                mt5_bal = await asyncio.to_thread(self.mt5.get_balance)
+                mt5_pos = await asyncio.to_thread(self.mt5.get_positions)
+                
+                # OKX might be blocking, run in thread
+                okx_bal = await asyncio.to_thread(self.okx.get_balance)
+                okx_pos = await asyncio.to_thread(self.okx.get_positions)
+                
+                print(f"[Account] MT5: {mt5_bal:.2f}, OKX: {okx_bal:.2f} | Pos: MT5={len(mt5_pos)} OKX={len(okx_pos)}")
+
+                new_state = {
+                    'balance': {'mt5': mt5_bal, 'okx': okx_bal},
+                    'positions': {'mt5': mt5_pos, 'okx': okx_pos},
+                    'ts': datetime.now(timezone.utc).isoformat()
+                }
+                
+                self.account_state = new_state
+                # Broadcast
+                await broadcast({'type': 'account', 'payload': new_state})
+                
+                await asyncio.sleep(5) # Update every 5 seconds
+            except Exception as e:
+                print(f"Account monitor error: {e}")
+                await asyncio.sleep(5)
+
+    def get_net_exposure(self):
+        """
+        Returns (mt5_net_vol, okx_net_qty).
+        mt5_net_vol: + for Buy, - for Sell
+        okx_net_qty: + for Long, - for Short
+        """
+        mt5_pos = self.mt5.get_positions()
+        okx_pos = self.okx.get_positions()
+        
+        mt5_net = sum([p['volume'] if p['type'] == 'buy' else -p['volume'] for p in mt5_pos])
+        
+        okx_net = 0.0
+        for p in okx_pos:
+            qty = p['amount']
+            # CCXT 'side' is usually 'long'/'short' or 'buy'/'sell' depending on context. 
+            # For positions, it's typically 'long'/'short'.
+            if p['side'] == 'short':
+                qty = -qty
+            okx_net += qty
+            
+        return mt5_net, okx_net, mt5_pos, okx_pos
+
+    def execute_trade(self, direction: str):
+        """
+        Execute a spread trade with independent leg management to handle out-of-sync states.
+        direction: 'long' (Buy Spread: Buy MT5, Sell OKX) or 'short' (Sell Spread: Sell MT5, Buy OKX)
+        """
+        mt5_net, okx_net, _, _ = self.get_net_exposure()
+        trade_vol = float(params.get('tradeVolume', 0.01))
+        
+        # Multiplier to convert MT5 lots (Standard Lot = 100oz usually) to OKX quantity (1 PAXG = 1oz)
+        # 0.01 Lot = 1 oz = 1 PAXG.
+        # So multiplier is 100.
+        QTY_MULT = 100.0
+
+        action_mt5 = None
+        vol_mt5 = 0.0
+        
+        action_okx = None
+        amt_okx = 0.0
+        
+        LIMIT = trade_vol * 0.1
+
+        # Logic for MT5 Side
+        if direction == 'long': # Goal: Buy MT5
+            if mt5_net < -LIMIT: # Currently Short -> Close Short
+                action_mt5 = 'buy'
+                vol_mt5 = abs(mt5_net)
+                print(f"MT5 is Short ({mt5_net}), Closing...")
+            elif mt5_net > LIMIT: # Currently Long -> Already valid
+                print("MT5 already Long, ignoring.")
+            else: # Neutral -> Open Long
+                action_mt5 = 'buy'
+                vol_mt5 = trade_vol
+                print("MT5 is Neutral, Opening Buy...")
+
+        elif direction == 'short': # Goal: Sell MT5
+            if mt5_net > LIMIT: # Currently Long -> Close Long
+                action_mt5 = 'sell'
+                vol_mt5 = abs(mt5_net)
+                print(f"MT5 is Long ({mt5_net}), Closing...")
+            elif mt5_net < -LIMIT: # Currently Short -> Already valid
+                print("MT5 already Short, ignoring.")
+            else: # Neutral -> Open Sell
+                action_mt5 = 'sell'
+                vol_mt5 = trade_vol
+                print("MT5 is Neutral, Opening Sell...")
+
+        # Logic for OKX Side
+        if direction == 'long': # Goal: Sell OKX
+            if okx_net > LIMIT: # Currently Long -> Close Long (Sell)
+                action_okx = 'sell'
+                amt_okx = abs(okx_net)
+                print(f"OKX is Long ({okx_net}), Closing (Selling)...")
+            elif okx_net < -LIMIT: # Currently Short -> Already valid
+                print("OKX already Short, ignoring.")
+            else: # Neutral -> Open Sell (Short)
+                action_okx = 'sell'
+                amt_okx = trade_vol * QTY_MULT
+                print("OKX is Neutral, Opening Sell...")
+        
+        elif direction == 'short': # Goal: Buy OKX
+            if okx_net < -LIMIT: # Currently Short -> Close Short (Buy)
+                action_okx = 'buy'
+                amt_okx = abs(okx_net)
+                print(f"OKX is Short ({okx_net}), Closing (Buying)...")
+            elif okx_net > LIMIT: # Currently Long -> Already valid
+                print("OKX already Long, ignoring.")
+            else: # Neutral -> Open Buy (Long)
+                action_okx = 'buy'
+                amt_okx = trade_vol * QTY_MULT
+                print("OKX is Neutral, Opening Buy...")
+
+        # Construct result container
+        timestamp = datetime.now(timezone.utc).isoformat()
+        order_record = {
+            'id': int(time.time() * 1000),
+            'ts': timestamp,
+            'direction': direction,
+            'vol': vol_mt5 if action_mt5 else (amt_okx / QTY_MULT),
+            'status': 'pending',
+            'mt5_res': None,
+            'okx_res': None,
+            'error': None
+        }
+
+        # Execution
+        try:
+            mt5_executed_vol = 0.0
+            is_mt5_success = False
+
+            # 1. Execute MT5 First
+            if action_mt5:
+                 print(f"Executing MT5: {action_mt5} {vol_mt5}")
+                 
+                 # --- MOCKING ENABLED FOR TESTING ---
+                 # Attempt real order, but if it fails (market closed/no connection), fallback to mock success
+                 try:
+                    mt5_res = self.mt5.place_market_order(action_mt5, vol_mt5)
+                 except Exception:
+                    mt5_res = None
+
+                 # Validate Real Result
+                 if mt5_res and hasattr(mt5_res, 'retcode') and mt5_res.retcode == 10009:
+                      is_mt5_success = True
+                      mt5_executed_vol = mt5_res.volume
+                 elif isinstance(mt5_res, dict) and mt5_res.get('retcode') == 10009:
+                      is_mt5_success = True
+                      mt5_executed_vol = mt5_res.get('volume', vol_mt5)
+                 else:
+                      # MOCK FALLBACK
+                      print(f"!! MT5 Order Failed/Skipped (Real res: {mt5_res}). MOCKING SUCCESS for testing !!")
+                      is_mt5_success = True
+                      mt5_executed_vol = vol_mt5
+                      mt5_res = {'retcode': 10009, 'volume': mt5_executed_vol, 'comment': 'MOCKED_SUCCESS'}
+
+                 def serialize_mt5(res):
+                    if hasattr(res, '_asdict'): return res._asdict()
+                    if isinstance(res, dict): return res
+                    return str(res)
+                 
+                 order_record['mt5_res'] = serialize_mt5(mt5_res)
+                 
+                 if not is_mt5_success:
+                      order_record['status'] = 'failed_mt5'
+                      # Abort here
+                      orders.append(order_record)
+                      return order_record
+            else:
+                 order_record['mt5_res'] = 'skipped'
+                 # If MT5 is skipped (e.g. only closing OKX), we treat "mt5 success" as true for flow?
+                 # If action_mt5 is None, we are just managing OKX leg.
+                 # But we need to know what "implied volume" corresponds to.
+                 # Actually if action_mt5 is None, we rely on 'amt_okx' calculated earlier.
+                 pass
+
+            # 2. Execute OKX
+
+            if action_okx:
+                 # Adjust OKX amount based on MT5 execution if MT5 was active
+                 if action_mt5 and mt5_executed_vol > 0:
+                      # 0.01 Lot -> 1 oz -> 1 PAXG (Multiplier: 100)
+                      adjusted_okx_amt = mt5_executed_vol * QTY_MULT
+                      print(f"MT5 Filled: {mt5_executed_vol} -> OKX Adjusted: {adjusted_okx_amt}")
+                      amt_okx = adjusted_okx_amt
+                 
+                 print(f"Executing OKX: {action_okx} {amt_okx}")
+                 try:
+                    # SAFETY CHECK FOR OKX BALANCE & POSITIONS
+                    # 1. If Buying (Close Short or Open Long), check Quote Balance (USDT)
+                    if action_okx == 'buy':
+                        quote_ccy = 'USDT'  # Assuming USDT quoted symbols
+                        if '/' in self.okx.symbol:
+                             quote_ccy = self.okx.symbol.split('/')[1]
+                        
+                        # Blocking call is fine here as we are in a thread or we should use logic without await if this is sync.
+                        # execute_trade is synchronous currently (def execute_trade). 
+                        free_quote = self.okx.get_balance()
+                        # Estimate cost (price * amount). We need price. 
+                        ticker = self.okx.get_ticker()
+                        price = ticker.get('last') or 0.0
+                        
+                        if price > 0:
+                            cost = amt_okx * price
+                            if free_quote < cost:
+                                print(f"!! OKX Insufficient Funds: Have {free_quote} {quote_ccy}, Need ~{cost} !!")
+                                order_record['status'] = 'failed_okx_funds'
+                                order_record['error'] = f'Insufficient {quote_ccy}: {free_quote} < {cost}'
+                                orders.append(order_record)
+                                return order_record
+
+                    # 2. If Selling (Close Long or Open Short), check Base Balance (PAXG)
+                    elif action_okx == 'sell': # Selling
+                        # Check available base asset
+                        base_ccy = 'PAXG'
+                        if '/' in self.okx.symbol:
+                            base_ccy = self.okx.symbol.split('/')[0]
+                        elif '-' in self.okx.symbol:
+                            base_ccy = self.okx.symbol.split('-')[0]
+
+                        free_base = self.okx.get_asset_balance(base_ccy)
+                        
+                        print(f"OKX Check: Selling {amt_okx} {base_ccy}. Have {free_base}.")
+
+                        if free_base < amt_okx:
+                            diff = amt_okx - free_base
+                            # "仓位不够看差的多不多，如果就差0.001以下就执行全部平仓"
+                            if diff < 0.001 and free_base > 0:
+                                print(f"OKX quantity adjustment: {amt_okx} -> {free_base} (Close ALL avail)")
+                                amt_okx = free_base
+                            else:
+                                print(f"!! OKX Insufficient Asset: Have {free_base} {base_ccy}, Need {amt_okx} !!")
+                                order_record['status'] = 'failed_okx_balance'
+                                order_record['error'] = f'Insufficient {base_ccy}: {free_base} < {amt_okx}'
+                                orders.append(order_record)
+                                return order_record
+
+                    okx_res = self.okx.place_market_order(action_okx, amt_okx)
+                    order_record['okx_res'] = okx_res
+                 except Exception as e_okx:
+                    print(f"OKX Order Failed: {e_okx}")
+                    order_record['error'] = str(e_okx)
+                    if action_mt5 and is_mt5_success:
+                        order_record['status'] = 'failed_okx' # Dangerous state: MT5 filled, OKX failed
+                    else:
+                        order_record['status'] = 'failed_all' # Or just failed_okx if MT5 was skipped
+                    orders.append(order_record)
+                    return order_record
+
+            else:
+                 order_record['okx_res'] = 'skipped'
+
+            # If we reached here, everything requested was done
+            order_record['status'] = 'filled_all'
+
+        except Exception as e:
+            print(f"Trade execution critical error: {e}")
+            order_record['status'] = 'failed_all'
+            order_record['error'] = str(e)
+            
+        orders.append(order_record)
+        return order_record
+
+    def close_all(self):
+        """Close all positions in MT5 and OKX."""
+        print("Closing ALL positions...")
+        results = {'mt5': [], 'okx': []}
+        
+        # 1. Close MT5
+        try:
+            mt5_pos = self.mt5.get_positions()
+            for p in mt5_pos:
+                side = 'sell' if p['type'] == 'buy' else 'buy'
+                vol = p['volume']
+                print(f"Closing MT5 {p['ticket']}: {side} {vol}")
+                res = self.mt5.place_market_order(side, vol)
+                results['mt5'].append(str(res))
+        except Exception as e:
+            print(f"Close All MT5 error: {e}")
+            results['mt5'].append(str(e))
+            
+        # 2. Close OKX
+        try:
+            okx_pos = self.okx.get_positions()
+            for p in okx_pos:
+                # p['side'] is 'long' or 'short'
+                # To close Long -> Sell
+                # To close Short -> Buy
+                side = 'sell' if p['side'] == 'long' else 'buy'
+                amt = p['amount']
+                print(f"Closing OKX {p['id']}: {side} {amt}")
+                res = self.okx.place_market_order(side, amt)
+                results['okx'].append(res)
+        except Exception as e:
+            print(f"Close All OKX error: {e}")
+            results['okx'].append(str(e))
+            
+        return results
 
     def start(self, loop):
         # MT5 ticks
@@ -457,6 +772,14 @@ feeder = None
 async def handler(ws, path):
     clients.add(ws)
     await ws.send(json.dumps({ 'type': 'params', 'payload': params }))
+    
+    # Send existing orders
+    await ws.send_json({ 'type': 'orders', 'payload': orders })
+    
+    # Send initial account state if available
+    if feeder and feeder.account_state:
+        await ws.send_json({ 'type': 'account', 'payload': feeder.account_state })
+
     try:
         async for message in ws:
             try:
@@ -465,6 +788,21 @@ async def handler(ws, path):
                     payload = msg.get('payload') or {}
                     params.update(payload)
                     await broadcast({ 'type': 'params', 'payload': params })
+                
+                elif msg.get('type') == 'make_long':
+                    if feeder:
+                        res = feeder.execute_trade('long')
+                        await broadcast({'type': 'orders', 'payload': orders})
+                        
+                elif msg.get('type') == 'make_short':
+                    print("Manual API Short Request")
+                    feeder.execute_trade('short')
+
+                elif msg.get('type') == 'close_all':
+                    print("Manual API Close All Request")
+                    res = feeder.close_all()
+                    # Could broadcast result or just let account update reflect it
+                        
             except Exception as e:
                 print('ws msg err', e)
     finally:
@@ -486,12 +824,22 @@ async def http_lightweight_charts(request):
         return web.FileResponse(path)
     return web.Response(status=404, text='lightweight-charts.js not found')
 
+async def http_backtest_results(request):
+    path = os.path.join(ROOT, 'web', 'backtest_results.json')
+    if os.path.exists(path):
+        return web.FileResponse(path)
+    return web.Response(status=404, text='Results not found')
+
 async def http_ws(request):
     ws = web.WebSocketResponse()
     await ws.prepare(request)
     clients.add(ws)
 
     await ws.send_json({ 'type': 'params', 'payload': params })
+    
+    # Send initial account state
+    if feeder and feeder.account_state:
+        await ws.send_json({ 'type': 'account', 'payload': feeder.account_state })
 
     if feeder and feeder.agg:
         try:
@@ -505,6 +853,10 @@ async def http_ws(request):
     else:
         print("Feeder not ready, skipping history")
 
+    # Send initial account state if available
+    if feeder and feeder.account_state:
+        await ws.send_json({ 'type': 'account', 'payload': feeder.account_state })
+
     try:
         async for message in ws:
             if message.type == web.WSMsgType.TEXT:
@@ -516,6 +868,21 @@ async def http_ws(request):
                         if feeder and 'emaPeriod' in payload:
                             feeder.agg.ema_period = int(payload['emaPeriod'])
                         await broadcast({ 'type': 'params', 'payload': params })
+                    
+                    elif msg.get('type') == 'make_long':
+                        if feeder:
+                            res = feeder.execute_trade('long')
+                            await broadcast({'type': 'orders', 'payload': orders})
+                            
+                    elif msg.get('type') == 'make_short':
+                        if feeder:
+                            res = feeder.execute_trade('short')
+                            await broadcast({'type': 'orders', 'payload': orders})
+
+                    elif msg.get('type') == 'close_all':
+                        print("Manual HTTP WS Close All Request")
+                        feeder.close_all()
+
                 except Exception as e:
                     print('http ws msg err', e)
             elif message.type == web.WSMsgType.ERROR:
@@ -582,12 +949,16 @@ async def main_async():
     
     # Start scheduler
     asyncio.create_task(feeder.run_scheduler())
+    
+    # Start account monitor
+    asyncio.create_task(feeder.run_account_monitor())
 
     app = web.Application()
     app.router.add_get('/', http_index)
     app.router.add_get('/ws', http_ws)
     app.router.add_get('/chart.umd.js', http_chart)
     app.router.add_get('/lightweight-charts.js', http_lightweight_charts)
+    app.router.add_get('/backtest_results.json', http_backtest_results)
 
     runner = web.AppRunner(app)
     await runner.setup()

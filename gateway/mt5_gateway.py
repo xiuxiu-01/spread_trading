@@ -37,6 +37,38 @@ class MT5Gateway:
             time.sleep(0.5)
 
     # Trading
+    def get_balance(self) -> float:
+        """Return account equity (or balance if preferred)"""
+        if not mt5.initialize():
+             return 0.0
+        info = mt5.account_info()
+        if info is None:
+            return 0.0
+        return float(info.equity)
+
+    def get_positions(self) -> List[Dict[str, Any]]:
+        """Return list of open positions for the symbol."""
+        if not mt5.initialize():
+            return []
+        positions = mt5.positions_get(symbol=self.symbol)
+        if positions is None:
+            return []
+        
+        out = []
+        for p in positions:
+            # p is a named tuple
+            out.append({
+                'ticket': p.ticket,
+                'time': p.time,
+                'type': 'buy' if p.type == mt5.POSITION_TYPE_BUY else 'sell',
+                'volume': p.volume,
+                'price_open': p.price_open,
+                'price_current': p.price_current,
+                'profit': p.profit,
+                'comment': p.comment
+            })
+        return out
+
     def place_market_order(self, side: str, volume: float, deviation: int = 20, fill_mode: int = mt5.ORDER_FILLING_IOC):
         tick = mt5.symbol_info_tick(self.symbol)
         if tick is None:

@@ -159,6 +159,132 @@ class OKXGateway:
         return False
 
     # Trading
+    def get_balance(self) -> float:
+        """Return free USDT balance (or relevant quote currency)."""
+        try:
+            # We assume quote currency is USDT for PAXG/USDT
+            # Robustly parse quote currency, handling '/' or '-' or failing gracefully
+            quote = 'USDT' # Default fallback
+            if '/' in self.symbol:
+                quote = self.symbol.split('/')[1]
+            elif '-' in self.symbol:
+                quote = self.symbol.split('-')[1]
+
+            bal = self.client.fetch_balance()
+            if quote in bal:
+                return float(bal[quote]['free'])
+            # fallback if structure differs
+            return float(bal.get('free', {}).get(quote, 0.0))
+        except Exception as e:
+            print(f"[OKXGateway] get_balance error: {e}")
+            return 0.0
+
+    def get_asset_balance(self, currency: str) -> float:
+        """Return free balance of a specific asset."""
+        try:
+            bal = self.client.fetch_balance()
+            if currency in bal:
+                 return float(bal[currency]['free'])
+            return float(bal.get('free', {}).get(currency, 0.0))
+        except Exception as e:
+            print(f"[OKXGateway] get_asset_balance({currency}) error: {e}")
+            return 0.0
+
+    def get_positions(self) -> list:
+        """Return open positions for this symbol."""
+        try:
+            # Try to fetch derivatives positions (Swap/Futures/Margin)
+            raw_positions = []
+            try:
+                raw_positions = self.client.fetch_positions([self.symbol])
+            except Exception as e:
+                # If fetch_positions fails (e.g. not supported for this symbol type), we continue
+                # print(f"[OKXGateway] fetch_positions debug: {e}")
+                pass
+
+            out = []
+            for p in raw_positions:
+                # ccxt unifies position structure
+                # Typically side is 'long' or 'short'
+                out.append({
+                    'id': p.get('id'),
+                    'side': p.get('side'), # long/short
+                    'amount': float(p.get('contracts') or p.get('amount') or 0),
+                    'openPrice': float(p.get('entryPrice') or 0),
+                    'unrealizedPnl': float(p.get('unrealizedPnl') or 0),
+                    'leverage': p.get('leverage'),
+                })
+            
+            # If no derivative positions, check if we have Spot assets (Base Currency)
+            # This is a heuristic to show Spot holdings as "Long Positions"
+            if not out and '/' in self.symbol:
+                # e.g. PAXG/USDT -> Base: PAXG
+                parts = self.symbol.split('/')
+                if len(parts) >= 1:
+                    base = parts[0]
+                    # We need to fetch balance again or cache it. 
+                    # For simplicity, we fetch it (rate limit allowing)
+                    bal = self.client.fetch_balance()
+                    
+                    # Check free balance (only free can be sold immediately)
+                    # We use 'free' instead of 'total' to avoid "Insufficient balance" when trying to sell locked funds.
+                    amount = float(bal.get(base, {}).get('free', 0.0))
+                    
+                    # Filter out dust (e.g. < 0.0001)
+                    if amount > 0.0001:
+                        out.append({
+                            'id': f'spot-{base}',
+                            'side': 'long', 
+                            'amount': amount,
+                            'openPrice': 0.0, # Cannot determine easily for Spot wallet
+                            'unrealizedPnl': 0.0,
+                            'leverage': 1.0,
+                        })
+
+            return out
+        except Exception as e:
+            print(f"[OKXGateway] get_positions error: {e}")
+            return []
+
+    def place_market_order(self, side: str, amount: float):
+        # 确定我们是在交易现货还是永续/期货
+        # 如果代码中包含 -SWAP 或者是期货，通常 create_order('market') 不需要更改，
+        # 但有时在双向持仓模式下需要指定 'positionSide' 为 'long'/'short'。
+        # 检查我们是单向持仓模式还是双向持仓模式？
+        # 为简单起见，如果未指定，我们假设是单向模式或标准净持仓模式。
+        # 但用户提到了“期货”。
+        
+        # 如果是期货，平仓时可能需要指定 'reduceOnly'？
+        # 但在这里我们通过简单的市价单进行开仓/平仓。
+        
+        # 确保数量在精度范围内
+        # CCXT 会处理这个问题，但有时传递格式化的字符串更安全
+        # self.client.load_markets() # Should be loaded
+        try:
+             amount = self.client.amount_to_precision(self.symbol, amount)
+        except Exception:
+             pass 
+        #如果可以平的仓位低于0.001但是amount为
+        params = {}
+        # 对于现货市价买单，如果要按基础货币数量购买而不是按计价货币金额购买，通常需要指定 'tgtCcy'
+        # 在 OKX 上买入现货时：
+        # 如果我们要买入 X 数量的基础货币（例如 1 PAXG），我们将 'tgtCcy' 设置为 'base_ccy'。
+        # 如果省略它，行为取决于交易所的默认值（市价买入通常默认为计价货币金额）。
+        # 我们显式将其设置为 base_ccy 以匹配我们的 'amount' 语义（即数量）。
+        if side == 'buy' and '/' in self.symbol: # Spot check
+             params['tgtCcy'] = 'base_ccy'
+             # 注意：OKX 现货买入时，交易手续费通常会从收到的基础资产（如PAXG）中扣除。
+             # 因此，如果你买入 1.0 PAXG，实际到账可能只有 0.999 PAXG（假设 0.1% 类手续费）。
+             # 这会导致持仓量略少于下单量，且与 MT5（通常从余额扣除手续费不影响持仓量）表现不同。
+             # Note: OKX Spot Buy deducts fees from the received base asset.
+             # Buying 1.0 might result in 0.999 balance. This is expected behavior.
+        
+        return self.client.create_order(symbol=self.symbol,
+                                        type='market',
+                                        side=side,
+                                        amount=amount,
+                                        params=params)
+
     def place_limit_order(self, side: str, amount: float, price: float, post_only: bool = True):
         params = {'postOnly': True} if post_only else {}
         return self.client.create_order(symbol=self.symbol,

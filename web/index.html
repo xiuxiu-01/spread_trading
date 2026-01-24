@@ -148,6 +148,29 @@
         <div id="connectionStatus" class="status disconnected">Disconnected</div>
     </header>
 
+    <div class="header">
+        <h1>MT5 <-> OKX Arbitrage Bot</h1>
+        <div id="status">Connecting...</div>
+    </div>
+    
+    <div class="panel">
+        <h3>Account Info</h3>
+        <div style="display: flex; gap: 20px;">
+            <div style="flex: 1; padding: 10px; background: #262626; border-radius: 4px;">
+                <strong>MT5 (XAU)</strong><br/>
+                Equity: <span id="mt5-equity">--</span><br/>
+                Positions: <span id="mt5-pos-count">0</span><br/>
+                Net Vol: <span id="mt5-net">0.00</span>
+            </div>
+            <div style="flex: 1; padding: 10px; background: #262626; border-radius: 4px;">
+                <strong>OKX (PAXG)</strong><br/>
+                USDT Free: <span id="okx-balance">--</span><br/>
+                Positions: <span id="okx-pos-count">0</span><br/>
+                Net Amt: <span id="okx-net">0.00000000</span>
+            </div>
+        </div>
+    </div>
+
     <div class="container">
         <div class="charts-column">
             <div class="chart-container" style="flex: 3;">
@@ -178,12 +201,67 @@
                 <p>OKX: <span id="okxSymbol">-</span></p>
                 <p>MT5: <span id="mt5Symbol">-</span></p>
             </div>
+            <div style="margin-top: 20px; border-top: 1px solid var(--border); padding-top: 20px;">
+                <h3>Manual Trading</h3>
+                <div class="control-group">
+                     <label>Volume (Lots)</label>
+                     <input type="number" id="tradeVol" value="0.01" step="0.01">
+                </div>
+                <div style="display: flex; gap: 10px; margin-bottom: 15px;">
+                    <button id="btnLong" style="background-color: var(--green);">Long Spread</button>
+                    <button id="btnShort" style="background-color: var(--red);">Short Spread</button>
+                </div>
+            </div>
+            
+            <div style="margin-top: 20px; border-top: 1px solid var(--border); padding-top: 20px; max-height: 200px; overflow-y: auto;">
+                 <h3>Order History</h3>
+                 <div id="orderList" style="font-size: 0.8rem;"></div>
+            </div>
+            
+             <div style="margin-top: 20px; border-top: 1px solid var(--border); padding-top: 20px;">
+                 <h3>Backtest</h3>
+                 <button id="loadBacktest" style="background-color: var(--accent);">Load 30D Results</button>
+                 <div id="backtestStats" style="margin-top: 10px; font-size: 0.8rem;"></div>
+             </div>
         </div>
     </div>
 
     <script>
-        // --- Lightweight Charts Setup ---
-        const { createChart, ColorType, CrosshairMode, LineStyle } = LightweightCharts;
+        function renderAccount(accountState) {
+        if (!accountState) return;
+
+        // MT5
+        const mt5Bal = accountState.balance.mt5;
+        const mt5Pos = accountState.positions.mt5 || [];
+        const mt5Net = mt5Pos.reduce((sum, p) => sum + (p.type === 'buy' ? p.volume : -p.volume), 0);
+        
+        document.getElementById('mt5-equity').textContent = mt5Bal.toFixed(2);
+        document.getElementById('mt5-pos-count').textContent = mt5Pos.length;
+        document.getElementById('mt5-net').textContent = mt5Net.toFixed(2);
+        
+        // Color code net exposure
+        const elMt5Net = document.getElementById('mt5-net');
+        elMt5Net.style.color = mt5Net > 0 ? 'var(--green)' : (mt5Net < 0 ? 'var(--red)' : '#d29922');
+
+        // OKX
+        const okxBal = accountState.balance.okx;
+        const okxPos = accountState.positions.okx || [];
+        let okxNet = 0;
+        okxPos.forEach(p => {
+            let amt = p.amount;
+            if (p.side === 'short') amt = -amt;
+            okxNet += amt;
+        });
+        
+        document.getElementById('okx-balance').textContent = okxBal.toFixed(4);
+        document.getElementById('okx-pos-count').textContent = okxPos.length;
+        document.getElementById('okx-net').textContent = okxNet.toFixed(8);
+
+        const elOkxNet = document.getElementById('okx-net');
+        elOkxNet.style.color = okxNet > 0 ? 'var(--green)' : (okxNet < 0 ? 'var(--red)' : '#d29922');
+    }
+
+    const { createChart, ColorType, CrosshairMode, LineStyle } = LightweightCharts;
 
         const chartOptions = {
             layout: {
@@ -388,15 +466,164 @@
 
         const paramsForm = document.getElementById('paramsForm');
         let currentParams = {};
+        let backtestMarkers = []; // Store markers from loaded backtest
+        
+        // Shadow data for live marker calculation
+        let globalSpreadData = [];
+        let globalEmaData = [];
 
         function handleMessage(msg) {
             if (msg.type === 'params') {
                 updateParamsUI(msg.payload);
+            } else if (msg.type === 'account') {
+                renderAccount(msg.payload);
             } else if (msg.type === 'bar') {
                updateCharts(msg.payload);
             } else if (msg.type === 'history') {
                 loadHistory(msg.payload);
+            } else if (msg.type === 'orders') {
+                updateOrderList(msg.payload);
             }
+        }
+        
+        // --- Backtest Visualization ---
+        document.getElementById('loadBacktest').addEventListener('click', async () => {
+             const btn = document.getElementById('loadBacktest');
+             btn.disabled = true;
+             btn.textContent = 'Loading...';
+             
+             try {
+                const res = await fetch('/backtest_results.json');
+                if (!res.ok) throw new Error('Not found');
+                const data = await res.json();
+                
+                // Show stats
+                const s = data.summary;
+                document.getElementById('backtestStats').innerHTML = 
+                    `Trades: ${s.total_trades} | PnL: ${s.total_pnl.toFixed(2)}`;
+                
+                // Plot entry/exits as markers on the spread chart
+                // We need to merge with existing markers
+                
+                // Reset local store
+                backtestMarkers = [];
+                 
+                 // Process trades
+                 data.trades.forEach(t => {
+                     // Entry Marker
+                     backtestMarkers.push({
+                         time: t.entry_ts, // ts is already INT seconds from backtest.py
+                         position: 'belowBar',
+                         color: '#FF9800',
+                         shape: 'arrowUp',
+                         text: `Ent L${t.level}`
+                     });
+                     
+                     // Exit Marker
+                     backtestMarkers.push({
+                         time: t.exit_ts,
+                         position: 'aboveBar',
+                         color: '#9C27B0',
+                         shape: 'arrowDown',
+                         text: `Ex ${t.pnl.toFixed(1)}`
+                     });
+                 });
+                 
+                 // Trigger update to merge
+                 // We need spreadData/emaData to re-run updateMarkers...
+                 // But we don't have them easily accessible here without querying the series or storing them.
+                 // Easier approach: Just set them now, and let next 'updateCharts' merge them?
+                 // No, 'updateCharts' is called inside 'loadHistory' (historical).
+                 // Live updates call 'updateCharts' -> 'updateMarkers'? 
+                 // Wait, 'updateCharts' receives a single BAR. It doesn't call 'updateMarkers' (which loops over history).
+                 
+                 // Let's check updateCharts.
+                 
+                 markers.sort((a,b) => a.time - b.time);
+                 spreadSeries.setMarkers(markers);
+                 
+             } catch (e) {
+                 alert('Failed to load backtest results: ' + e);
+             } finally {
+                 btn.disabled = false;
+                 btn.textContent = 'Load 30D Results';
+             }
+        });
+        
+        // --- Order Handling ---
+        
+        document.getElementById('btnLong').addEventListener('click', () => {
+             const vol = document.getElementById('tradeVol').value;
+             // Send parameters update first to set volume preferrence on backend? 
+             // Ideally we send volume in the command. But for now based on backend logic:
+             // Backend reads tradeVolume from params. Let's update params or assume default
+             // A better way is to send 'make_long' with arguments.
+             
+             // Updating params first to ensure volume is correct
+             ws.send(JSON.stringify({
+                 type: 'params',
+                 payload: { tradeVolume: parseFloat(vol) }
+             }));
+             
+             setTimeout(() => {
+                 ws.send(JSON.stringify({ type: 'make_long' }));
+             }, 100);
+        });
+        
+        document.getElementById('btnShort').addEventListener('click', () => {
+             const vol = document.getElementById('tradeVol').value;
+             ws.send(JSON.stringify({
+                 type: 'params',
+                 payload: { tradeVolume: parseFloat(vol) }
+             }));
+             setTimeout(() => {
+                 ws.send(JSON.stringify({ type: 'make_short' }));
+             }, 100);
+        });
+        
+        // Add Close All Button Handler
+        const closeAllBtn = document.createElement('button');
+        closeAllBtn.innerText = 'CLOSE ALL POSITIONS';
+        closeAllBtn.style.backgroundColor = '#da3633'; // Red
+        closeAllBtn.style.marginTop = '10px';
+        closeAllBtn.onclick = () => {
+             if(confirm("Are you sure you want to CLOSE ALL positions on MT5 and OKX?")) {
+                 ws.send(JSON.stringify({ type: 'close_all' }));
+             }
+        };
+        // Append to control panel
+        document.querySelector('.controls-column').appendChild(closeAllBtn);
+
+        function updateOrderList(orders) {
+            const list = document.getElementById('orderList');
+            list.innerHTML = '';
+            
+            // Show latest first
+            const sorted = [...orders].sort((a,b) => b.id - a.id);
+            
+            sorted.forEach(o => {
+                const item = document.createElement('div');
+                item.style.borderBottom = '1px solid #30363d';
+                item.style.padding = '5px 0';
+                
+                const timeStr = new Date(o.ts).toLocaleTimeString();
+                
+                const color = o.direction === 'long' ? 'var(--green)' : 'var(--red)';
+
+                let statusColor = '#8b949e';
+                if (o.status === 'filled') statusColor = 'var(--green)';
+                if (o.status === 'failed') statusColor = 'var(--red)';
+
+                item.innerHTML = `
+                    <div style="display: flex; justify-content: space-between;">
+                        <span style="font-weight: bold; color: ${color}">${o.direction.toUpperCase()}</span>
+                        <span style="color: #8b949e">${timeStr}</span>
+                    </div>
+                    <div>Vol: ${o.vol} | Status: <span style="color: ${statusColor}">${o.status}</span></div>
+                    ${o.error ? `<div style="color: var(--red); font-size: 0.7em;">${o.error}</div>` : ''}
+                `;
+                list.appendChild(item);
+            });
         }
 
         // Format of history payload: { ts: [time1, time2...], mt5: [candle1...], okx: [candle2...] }
@@ -449,7 +676,7 @@
             // Create a map of time -> okx candle
             const okxMap = new Map();
             okxData.forEach(c => okxMap.set(c.time, c));
-            
+
             const spreadData = [];
             
             // Iterate MT5 and find matching OKX
@@ -472,10 +699,53 @@
                 const period = currentParams.emaPeriod || 60; 
                 const emaData = calculateEMA(spreadData, period);
                 emaSeries.setData(emaData);
+
+                // Add markers logic here based on spread/EMA crossing or external signals
+                updateMarkers(spreadData, emaData); 
             }
             
             // Adjust scale to fit
             priceChart.timeScale().fitContent();
+        }
+
+        function updateMarkers(spreadData, emaData) {
+            // Visualize simplistic strategy signals on the chart
+            // For now, let's just mark where Spread crosses EMA
+            // Real application would receive explicit signals from backend
+            
+            let markers = [...backtestMarkers]; // Start with backtest markers
+            
+            // Basic simplistic crossover
+            for(let i=1; i<spreadData.length; i++) {
+                const prevS = spreadData[i-1].value;
+                const currS = spreadData[i].value;
+                const prevE = emaData[i-1].value;
+                const currE = emaData[i].value;
+                
+                // Bullish Cross (Spread goes above EMA)
+                if (prevS <= prevE && currS > currE) {
+                     markers.push({
+                        time: spreadData[i].time,
+                        position: 'belowBar',
+                        color: '#2196F3',
+                        shape: 'arrowUp',
+                        text: 'CrossUp'
+                    });
+                }
+                // Bearish Cross (Spread goes below EMA)
+                else if (prevS >= prevE && currS < currE) {
+                    markers.push({
+                        time: spreadData[i].time,
+                        position: 'aboveBar',
+                        color: '#E91E63',
+                        shape: 'arrowDown',
+                        text: 'CrossDown'
+                    });
+                }
+            }
+            // Sort by time
+            markers.sort((a,b) => a.time - b.time);
+            spreadSeries.setMarkers(markers);
         }
 
         function calculateEMA(data, period) {
@@ -556,29 +826,55 @@
             
             // 1. Price
             // MT5
-            mt5Series.update({
-                time: time,
-                open: bar.mt5.open,
-                high: bar.mt5.high,
-                low: bar.mt5.low,
-                close: bar.mt5.close
-            });
+            if (bar.mt5.close > 0) {
+                 mt5Series.update({
+                    time: time,
+                    open: bar.mt5.open,
+                    high: bar.mt5.high,
+                    low: bar.mt5.low,
+                    close: bar.mt5.close
+                });
+            }
             // OKX
-            okxSeries.update({
-                time: time,
-                open: bar.okx.open,
-                high: bar.okx.high,
-                low: bar.okx.low,
-                close: bar.okx.close
-            });
+            if (bar.okx.close > 0) {
+                okxSeries.update({
+                    time: time,
+                    open: bar.okx.open,
+                    high: bar.okx.high,
+                    low: bar.okx.low,
+                    close: bar.okx.close
+                });
+            }
             
             // Legend Update
-            document.getElementById('mt5Val').textContent = bar.mt5.close.toFixed(2);
-            document.getElementById('okxVal').textContent = bar.okx.close.toFixed(2);
+            if (bar.mt5.close > 0) document.getElementById('mt5Val').textContent = bar.mt5.close.toFixed(2);
+            if (bar.okx.close > 0) document.getElementById('okxVal').textContent = bar.okx.close.toFixed(2);
 
             // 2. Spread
             spreadSeries.update({ time: time, value: bar.spread });
             emaSeries.update({ time: time, value: bar.ema });
+            
+            // Update shadow data for markers
+            // We append new bar to global data
+            // To prevent duplicates, check last time
+            if (globalSpreadData.length === 0 || globalSpreadData[globalSpreadData.length-1].time !== time) {
+                globalSpreadData.push({ time: time, value: bar.spread });
+                globalEmaData.push({ time: time, value: bar.ema });
+                
+                // Keep buffer size reasonable
+                if (globalSpreadData.length > 5000) {
+                    globalSpreadData = globalSpreadData.slice(-5000);
+                    globalEmaData = globalEmaData.slice(-5000);
+                }
+                
+                // Re-calculate markers periodically or on new bar?
+                // For simplicity, re-run updateMarkers with the latest window
+                // But updateMarkers processes the WHOLE array. 
+                // Optimization: Just check the last few points?
+                // 'updateMarkers' sorts and replaces ALL markers. 
+                // So calling it here is fine but overhead.
+                updateMarkers(globalSpreadData, globalEmaData);
+            }
             
             // Bands
             // Ensure band series exist
