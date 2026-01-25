@@ -165,10 +165,10 @@ class OKXGateway:
             # We assume quote currency is USDT for PAXG/USDT
             # Robustly parse quote currency, handling '/' or '-' or failing gracefully
             quote = 'USDT' # Default fallback
-            if '/' in self.symbol:
-                quote = self.symbol.split('/')[1]
-            elif '-' in self.symbol:
-                quote = self.symbol.split('-')[1]
+            # if '/' in self.symbol:
+            #     quote = self.symbol.split('/')[1]
+            # elif '-' in self.symbol:
+            #     quote = self.symbol.split('-')[1]
 
             bal = self.client.fetch_balance()
             if quote in bal:
@@ -202,14 +202,35 @@ class OKXGateway:
                 # print(f"[OKXGateway] fetch_positions debug: {e}")
                 pass
 
+            # Ensure markets are loaded for contractSize lookup
+            if not self.client.markets:
+                try: 
+                    self.client.load_markets() 
+                except Exception: 
+                    pass
+
             out = []
             for p in raw_positions:
                 # ccxt unifies position structure
                 # Typically side is 'long' or 'short'
+                raw_amount = float(p.get('contracts') or p.get('amount') or 0)
+                final_amount = raw_amount
+
+                # Convert contracts to asset quantity if applicable (e.g. 5 contracts -> 0.005 oz)
+                is_swap_or_future = (':' in self.symbol or '-SWAP' in self.symbol or '-FUT' in self.symbol)
+                if is_swap_or_future:
+                    try:
+                        market = self.client.market(self.symbol)
+                        contract_size = market.get('contractSize')
+                        if contract_size and contract_size > 0:
+                            final_amount = raw_amount * contract_size
+                    except Exception:
+                        pass
+
                 out.append({
                     'id': p.get('id'),
                     'side': p.get('side'), # long/short
-                    'amount': float(p.get('contracts') or p.get('amount') or 0),
+                    'amount': final_amount/100,
                     'openPrice': float(p.get('entryPrice') or 0),
                     'unrealizedPnl': float(p.get('unrealizedPnl') or 0),
                     'leverage': p.get('leverage'),
@@ -248,36 +269,53 @@ class OKXGateway:
 
     def place_market_order(self, side: str, amount: float):
         # 确定我们是在交易现货还是永续/期货
-        # 如果代码中包含 -SWAP 或者是期货，通常 create_order('market') 不需要更改，
-        # 但有时在双向持仓模式下需要指定 'positionSide' 为 'long'/'short'。
-        # 检查我们是单向持仓模式还是双向持仓模式？
-        # 为简单起见，如果未指定，我们假设是单向模式或标准净持仓模式。
-        # 但用户提到了“期货”。
-        
-        # 如果是期货，平仓时可能需要指定 'reduceOnly'？
-        # 但在这里我们通过简单的市价单进行开仓/平仓。
-        
-        # 确保数量在精度范围内
-        # CCXT 会处理这个问题，但有时传递格式化的字符串更安全
-        # self.client.load_markets() # Should be loaded
+        # Refresh markets to ensure we have contractSize (try/catch to avoid blocking)
         try:
+             if not self.client.markets:
+                 self.client.load_markets()
+        except Exception:
+             pass
+
+        is_swap_or_future = (':' in self.symbol or '-SWAP' in self.symbol or '-FUT' in self.symbol) and '/' in self.symbol
+        
+        # Adjust for Contract Size if Futures/Swap
+        if is_swap_or_future:
+            try:
+                market = self.client.market(self.symbol)
+                contract_size = market.get('contractSize')
+                if contract_size and contract_size > 0:
+                     # Input 'amount' is treated as Base Asset Quantity (e.g. 1.0 Oz).
+                     # We need to convert to Number of Contracts.
+                     # e.g. 1.0 Oz / 0.001 (Size) = 1000 Contracts
+                     num_contracts = amount / contract_size
+                     print(f"[OKXGateway] Converting {amount} base qty -> {num_contracts} contracts (Size: {contract_size})")
+                     # Use round() to avoid floating point undershoot (e.g. 4.9999 -> 5)
+                     amount = int(round(num_contracts)) 
+            except Exception as e:
+                print(f"[OKXGateway] contract size calc error: {e}")
+
+        # 确保数量在精度范围内
+        try:
+             # okx amount for swaps usually requires string integer or float string
              amount = self.client.amount_to_precision(self.symbol, amount)
         except Exception:
              pass 
-        #如果可以平的仓位低于0.001但是amount为
+
         params = {}
-        # 对于现货市价买单，如果要按基础货币数量购买而不是按计价货币金额购买，通常需要指定 'tgtCcy'
-        # 在 OKX 上买入现货时：
-        # 如果我们要买入 X 数量的基础货币（例如 1 PAXG），我们将 'tgtCcy' 设置为 'base_ccy'。
-        # 如果省略它，行为取决于交易所的默认值（市价买入通常默认为计价货币金额）。
-        # 我们显式将其设置为 base_ccy 以匹配我们的 'amount' 语义（即数量）。
-        if side == 'buy' and '/' in self.symbol: # Spot check
+        # if side == 'buy' and not is_swap_or_future:
+        # Determine if Spot: Must have '/' but exclude special symbols like ':' or SWAP/FUT
+        is_spot = ('/' in self.symbol and ':' not in self.symbol and '-SWAP' not in self.symbol and '-FUT' not in self.symbol)
+        
+        if side == 'buy' and is_spot: 
              params['tgtCcy'] = 'base_ccy'
-             # 注意：OKX 现货买入时，交易手续费通常会从收到的基础资产（如PAXG）中扣除。
-             # 因此，如果你买入 1.0 PAXG，实际到账可能只有 0.999 PAXG（假设 0.1% 类手续费）。
-             # 这会导致持仓量略少于下单量，且与 MT5（通常从余额扣除手续费不影响持仓量）表现不同。
-             # Note: OKX Spot Buy deducts fees from the received base asset.
-             # Buying 1.0 might result in 0.999 balance. This is expected behavior.
+
+        # For Futures in Net Mode (verified via debug_okx), we can just use side='buy'/'sell'.
+        # However, ccxt sometimes defaults to createMarketBuyOrder which might add reduceOnly=False.
+        # If we have existing positions, we might want to check 'reduceOnly' if closing?
+        # But 'net' mode usually auto-nets.
+        # IMPORTANT: 'posSide' is NOT required for 'net' mode, but IS required for 'long_short' mode.
+        # The debug log shows "posSide": "net" in account config, so we are in Net Mode.
+        # Just in case, let's explicitly remove 'posSide' if it sneaks in, or avoid adding it.
         
         return self.client.create_order(symbol=self.symbol,
                                         type='market',

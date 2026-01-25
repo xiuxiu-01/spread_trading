@@ -195,6 +195,19 @@
             <h3>Parameters</h3>
             <div id="paramsForm">
                 <!-- Params generated here -->
+                <div class="field-row">
+                    <label>Trade Volume (Lot/Oz)</label>
+                    <input type="number" step="0.01" id="tradeVol" value="0.01">
+                </div>
+
+                <div class="field-row">
+                    <label style="display:inline-flex; align-items:center; width:100%; cursor:pointer;">
+                        <input type="checkbox" id="chkAutoTrade" style="width: auto; margin-right: 8px;">
+                        Enable Auto Trade
+                    </label>
+                </div>
+
+                <button type="submit" class="primary">Update Params</button>
             </div>
             <button id="updateBtn">Update Params</button>
             <div style="margin-top: 20px; font-size: 0.8rem; color: #8b949e;">
@@ -210,6 +223,10 @@
                 <div style="display: flex; gap: 10px; margin-bottom: 15px;">
                     <button id="btnLong" style="background-color: var(--green);">Long Spread</button>
                     <button id="btnShort" style="background-color: var(--red);">Short Spread</button>
+                </div>
+                <div class="control-group">
+                    <label for="chkAutoTrade">Enable Auto Trade</label>
+                    <input type="checkbox" id="chkAutoTrade">
                 </div>
             </div>
             
@@ -580,6 +597,18 @@
                  ws.send(JSON.stringify({ type: 'make_short' }));
              }, 100);
         });
+
+        // Auto Trade Checkbox Handler
+        const autoTradeCheckbox = document.getElementById('chkAutoTrade');
+        if (autoTradeCheckbox) {
+            autoTradeCheckbox.addEventListener('change', (e) => {
+                const auto = e.target.checked;
+                ws.send(JSON.stringify({
+                    type: 'params',
+                    payload: { autoTrade: auto }
+                }));
+            });
+        }
         
         // Add Close All Button Handler
         const closeAllBtn = document.createElement('button');
@@ -781,6 +810,17 @@
                     paramsForm.appendChild(div);
                 }
             });
+
+            document.getElementById('pTakeProfit').value = params.takeProfit || 6.0;
+            document.getElementById('pMaxPos').value = params.maxPos || 3;
+            document.getElementById('tradeVol').value = params.tradeVolume || 0.01;
+            
+            const chkAuto = document.getElementById('chkAutoTrade');
+            if (chkAuto && params.autoTrade !== undefined) {
+                chkAuto.checked = params.autoTrade;
+            }
+
+            currentParams = params;
         }
 
         document.getElementById('updateBtn').addEventListener('click', () => {

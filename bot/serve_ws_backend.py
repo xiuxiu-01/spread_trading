@@ -32,7 +32,7 @@ NEXT_SPREAD = float(os.getenv('NEXT_SPREAD', '1.0'))
 TAKE_PROFIT = float(os.getenv('TAKE_PROFIT', '6.0'))
 MAX_POS = int(os.getenv('MAX_POS', '3'))
 
-SYMBOL_OKX = os.getenv('OKX_SYMBOL', 'PAXG/USDT')
+SYMBOL_OKX = os.getenv('OKX_SYMBOL', 'XAU/USDT:USDT')
 SYMBOL_MT5 = os.getenv('MT5_SYMBOL', 'XAU')
 
 clients = set()
@@ -45,6 +45,7 @@ params = {
     'OKX_SYMBOL': SYMBOL_OKX,
     'MT5_SYMBOL': SYMBOL_MT5,
     'tradeVolume': 0.01, # Default trade volume (lots for MT5, converted for OKX)
+    'autoTrade': False, # New parameter for Auto Trade
 }
 orders = [] # In-memory order history
 
@@ -324,6 +325,36 @@ class Aggregator:
                     }
         return None
 
+    def _decorate_bar(self, bar):
+        ema = bar['ema']
+        spread = bar['spread']
+        bands = []
+        signal_action = None # 'long' or 'short' or None
+
+        if ema is not None and spread is not None:
+            first_upper = ema + float(params['firstSpread'])
+            first_lower = ema - float(params['firstSpread'])
+            
+            # Logic:
+            # Spread > Upper -> We want to Short the Spread (Sell MT5, Buy OKX) expecting convergence
+            # Spread < Lower -> We want to Long the Spread (Buy MT5, Sell OKX) expecting convergence/rebound
+            
+            if spread > first_upper:
+                signal_action = 'short'
+            elif spread < first_lower:
+                signal_action = 'long'
+
+        for lvl in range(1, int(params['maxPos']) + 1):
+            upper = ema + float(params['firstSpread']) + (lvl - 1) * float(params['nextSpread'])
+            lower = ema - float(params['firstSpread']) - (lvl - 1) * float(params['nextSpread'])
+            bands.append({'upper': upper, 'lower': lower, 'lvl': lvl})
+
+        # Automated Trading Logic
+        if signal_action and params.get('autoTrade', False):
+             pass
+
+        return {**bar, 'bands': bands, 'signal': signal_action}
+
 class Feeder:
     def __init__(self):
         self.okx = OKXGateway(symbol=SYMBOL_OKX)
@@ -399,10 +430,12 @@ class Feeder:
         """
         mt5_net, okx_net, _, _ = self.get_net_exposure()
         trade_vol = float(params.get('tradeVolume', 0.01))
+            
+        print(f"[Execute] Direction: {direction}, Vol: {trade_vol}, MaxPos: {params.get('maxPos')}")
+
+        max_pos = int(params.get('maxPos', 3))
         
         # Multiplier to convert MT5 lots (Standard Lot = 100oz usually) to OKX quantity (1 PAXG = 1oz)
-        # 0.01 Lot = 1 oz = 1 PAXG.
-        # So multiplier is 100.
         QTY_MULT = 100.0
 
         action_mt5 = None
@@ -412,6 +445,7 @@ class Feeder:
         amt_okx = 0.0
         
         LIMIT = trade_vol * 0.1
+        max_vol_mt5 = max_pos * trade_vol
 
         # Logic for MT5 Side
         if direction == 'long': # Goal: Buy MT5
@@ -419,49 +453,54 @@ class Feeder:
                 action_mt5 = 'buy'
                 vol_mt5 = abs(mt5_net)
                 print(f"MT5 is Short ({mt5_net}), Closing...")
-            elif mt5_net > LIMIT: # Currently Long -> Already valid
-                print("MT5 already Long, ignoring.")
-            else: # Neutral -> Open Long
+            elif mt5_net < max_vol_mt5 - LIMIT: # Currently Neutral or Long < Max -> Open Long
                 action_mt5 = 'buy'
                 vol_mt5 = trade_vol
-                print("MT5 is Neutral, Opening Buy...")
+                print(f"MT5 Opening Buy (Current: {mt5_net:.4f}, Max: {max_vol_mt5:.4f})...")
+            else: 
+                print(f"MT5 Max Long Reached ({mt5_net:.4f}). Ignoring.")
 
         elif direction == 'short': # Goal: Sell MT5
             if mt5_net > LIMIT: # Currently Long -> Close Long
                 action_mt5 = 'sell'
                 vol_mt5 = abs(mt5_net)
                 print(f"MT5 is Long ({mt5_net}), Closing...")
-            elif mt5_net < -LIMIT: # Currently Short -> Already valid
-                print("MT5 already Short, ignoring.")
-            else: # Neutral -> Open Sell
+            elif mt5_net > -(max_vol_mt5 - LIMIT): # Currently Neutral or Short > -Max -> Open Sell
                 action_mt5 = 'sell'
                 vol_mt5 = trade_vol
-                print("MT5 is Neutral, Opening Sell...")
+                print(f"MT5 Opening Sell (Current: {mt5_net:.4f}, Max: -{max_vol_mt5:.4f})...")
+            else: 
+                print(f"MT5 Max Short Reached ({mt5_net:.4f}). Ignoring.")
 
         # Logic for OKX Side
+        # Max Quantity for OKX
+        max_qty_okx = max_vol_mt5 * QTY_MULT
+
         if direction == 'long': # Goal: Sell OKX
             if okx_net > LIMIT: # Currently Long -> Close Long (Sell)
+                # For Futures: Close Long = Sell to Close
                 action_okx = 'sell'
                 amt_okx = abs(okx_net)
                 print(f"OKX is Long ({okx_net}), Closing (Selling)...")
-            elif okx_net < -LIMIT: # Currently Short -> Already valid
-                print("OKX already Short, ignoring.")
-            else: # Neutral -> Open Sell (Short)
+            elif okx_net > - (max_qty_okx - LIMIT * QTY_MULT): # Room to Short
                 action_okx = 'sell'
                 amt_okx = trade_vol * QTY_MULT
-                print("OKX is Neutral, Opening Sell...")
+                print(f"OKX Opening Short (Current: {okx_net:.4f}, Max: -{max_qty_okx:.4f})...")
+            else:
+                print(f"OKX Max Short Reached ({okx_net:.4f}). Ignoring.")
         
         elif direction == 'short': # Goal: Buy OKX
             if okx_net < -LIMIT: # Currently Short -> Close Short (Buy)
+                # For Futures: Close Short = Buy to Cover
                 action_okx = 'buy'
                 amt_okx = abs(okx_net)
                 print(f"OKX is Short ({okx_net}), Closing (Buying)...")
-            elif okx_net > LIMIT: # Currently Long -> Already valid
-                print("OKX already Long, ignoring.")
-            else: # Neutral -> Open Buy (Long)
+            elif okx_net < (max_qty_okx - LIMIT * QTY_MULT): # Room to Long
                 action_okx = 'buy'
                 amt_okx = trade_vol * QTY_MULT
-                print("OKX is Neutral, Opening Buy...")
+                print(f"OKX Opening Long (Current: {okx_net:.4f}, Max: {max_qty_okx:.4f})...")
+            else:
+                 print(f"OKX Max Long Reached ({okx_net:.4f}). Ignoring.")
 
         # Construct result container
         timestamp = datetime.now(timezone.utc).isoformat()
@@ -538,54 +577,57 @@ class Feeder:
                  
                  print(f"Executing OKX: {action_okx} {amt_okx}")
                  try:
-                    # SAFETY CHECK FOR OKX BALANCE & POSITIONS
-                    # 1. If Buying (Close Short or Open Long), check Quote Balance (USDT)
-                    if action_okx == 'buy':
-                        quote_ccy = 'USDT'  # Assuming USDT quoted symbols
-                        if '/' in self.okx.symbol:
-                             quote_ccy = self.okx.symbol.split('/')[1]
-                        
-                        # Blocking call is fine here as we are in a thread or we should use logic without await if this is sync.
-                        # execute_trade is synchronous currently (def execute_trade). 
-                        free_quote = self.okx.get_balance()
-                        # Estimate cost (price * amount). We need price. 
-                        ticker = self.okx.get_ticker()
-                        price = ticker.get('last') or 0.0
-                        
-                        if price > 0:
-                            cost = amt_okx * price
-                            if free_quote < cost:
-                                print(f"!! OKX Insufficient Funds: Have {free_quote} {quote_ccy}, Need ~{cost} !!")
-                                order_record['status'] = 'failed_okx_funds'
-                                order_record['error'] = f'Insufficient {quote_ccy}: {free_quote} < {cost}'
-                                orders.append(order_record)
-                                return order_record
+                    # FOR FUTURES/SWAP: We don't check Balance the same way as SPOT.
+                    # We check Margin generally, but "is_spot" logic is needed.
+                    is_spot = ('/' in self.okx.symbol and ':' not in self.okx.symbol and '-SWAP' not in self.okx.symbol)
+                    
+                    if is_spot:
+                        # SAFETY CHECK FOR OKX BALANCE & POSITIONS
+                        # 1. If Buying (Close Short or Open Long), check Quote Balance (USDT)
+                        if action_okx == 'buy':
+                            quote_ccy = 'USDT'  # Assuming USDT quoted symbols
+                            if '/' in self.okx.symbol:
+                                 quote_ccy = self.okx.symbol.split('/')[1]
+                            
+                            free_quote = self.okx.get_balance()
+                            ticker = self.okx.get_ticker()
+                            price = ticker.get('last') or 0.0
+                            
+                            if price > 0:
+                                cost = amt_okx * price
+                                if free_quote < cost:
+                                    print(f"!! OKX Insufficient Funds: Have {free_quote} {quote_ccy}, Need ~{cost} !!")
+                                    order_record['status'] = 'failed_okx_funds'
+                                    order_record['error'] = f'Insufficient {quote_ccy}: {free_quote} < {cost}'
+                                    orders.append(order_record)
+                                    return order_record
 
-                    # 2. If Selling (Close Long or Open Short), check Base Balance (PAXG)
-                    elif action_okx == 'sell': # Selling
-                        # Check available base asset
-                        base_ccy = 'PAXG'
-                        if '/' in self.okx.symbol:
-                            base_ccy = self.okx.symbol.split('/')[0]
-                        elif '-' in self.okx.symbol:
-                            base_ccy = self.okx.symbol.split('-')[0]
+                        # 2. If Selling (Close Long or Open Short), check Base Balance (PAXG)
+                        elif action_okx == 'sell': # Selling
+                            base_ccy = 'PAXG'
+                            if '/' in self.okx.symbol:
+                                base_ccy = self.okx.symbol.split('/')[0]
+                            elif '-' in self.okx.symbol:
+                                base_ccy = self.okx.symbol.split('-')[0]
 
-                        free_base = self.okx.get_asset_balance(base_ccy)
-                        
-                        print(f"OKX Check: Selling {amt_okx} {base_ccy}. Have {free_base}.")
+                            free_base = self.okx.get_asset_balance(base_ccy)
+                            
+                            print(f"OKX Check: Selling {amt_okx} {base_ccy}. Have {free_base}.")
 
-                        if free_base < amt_okx:
-                            diff = amt_okx - free_base
-                            # "仓位不够看差的多不多，如果就差0.001以下就执行全部平仓"
-                            if diff < 0.001 and free_base > 0:
-                                print(f"OKX quantity adjustment: {amt_okx} -> {free_base} (Close ALL avail)")
-                                amt_okx = free_base
-                            else:
-                                print(f"!! OKX Insufficient Asset: Have {free_base} {base_ccy}, Need {amt_okx} !!")
-                                order_record['status'] = 'failed_okx_balance'
-                                order_record['error'] = f'Insufficient {base_ccy}: {free_base} < {amt_okx}'
-                                orders.append(order_record)
-                                return order_record
+                            if free_base < amt_okx:
+                                diff = amt_okx - free_base
+                                if diff < 0.001 and free_base > 0:
+                                    print(f"OKX quantity adjustment: {amt_okx} -> {free_base} (Close ALL avail)")
+                                    amt_okx = free_base
+                                else:
+                                    print(f"!! OKX Insufficient Asset: Have {free_base} {base_ccy}, Need {amt_okx} !!")
+                                    order_record['status'] = 'failed_okx_balance'
+                                    order_record['error'] = f'Insufficient {base_ccy}: {free_base} < {amt_okx}'
+                                    orders.append(order_record)
+                                    return order_record
+                    
+                    # For Futures, we skip balance check for now or implement margin check later.
+                    # Relying on exchange error for insufficient margin.
 
                     okx_res = self.okx.place_market_order(action_okx, amt_okx)
                     order_record['okx_res'] = okx_res
@@ -661,10 +703,11 @@ class Feeder:
                     
                     bid = tick.get('bid'); ask = tick.get('ask')
                     ts = datetime.now(timezone.utc)
-                    bar = self.agg.on_mt5_tick(bid, ask, ts)
-                    if bar:
-                        self.agg.save_bar(bar)
-                        asyncio.run_coroutine_threadsafe(broadcast({'type': 'bar', 'payload': self._decorate_bar(bar)}), loop)
+                    if bid and ask:
+                        # Use call_soon_threadsafe to interact with the loop from a thread
+                        loop.call_soon_threadsafe(
+                            lambda: asyncio.create_task(self.process_mt5_tick(bid, ask, ts))
+                        )
             except Exception as e:
                 print(f"MT5 Thread loop error: {e}")
         threading.Thread(target=mt5_thread, daemon=True).start()
@@ -679,15 +722,47 @@ class Feeder:
                     if bids and asks:
                         best_bid = bids[0][0]; best_ask = asks[0][0]
                         ts = datetime.now(timezone.utc)
-                        bar = self.agg.on_okx_tick(best_bid, best_ask, ts)
-                        if bar:
-                            self.agg.save_bar(bar)
-                            asyncio.run_coroutine_threadsafe(broadcast({'type': 'bar', 'payload': self._decorate_bar(bar)}), loop)
+                        # Use call_soon_threadsafe to interact with the loop from a thread
+                        loop.call_soon_threadsafe(
+                            lambda: asyncio.create_task(self.process_okx_tick(best_bid, best_ask, ts))
+                        )
                     time.sleep(0.5)
                 except Exception as e:
                     print(f"OKX Thread loop error: {e}")
                     time.sleep(1)
         threading.Thread(target=okx_thread, daemon=True).start()
+
+    async def process_mt5_tick(self, bid, ask, ts):
+        bar = self.agg.on_mt5_tick(bid, ask, ts)
+        if bar:
+            self.agg.save_bar(bar)
+            decorated = self._decorate_bar(bar)
+            
+            # Check Auto Trade
+            if decorated.get('signal') and params.get('autoTrade', False):
+                signal = decorated['signal']
+                print(f"[AutoTrade] Triggering {signal} based on spread {bar['spread']:.2f} vs EMA {bar['ema']:.2f}")
+                # Execute asynchronously
+                loop = asyncio.get_running_loop()
+                loop.call_soon(lambda: self.execute_trade(signal))
+
+            await broadcast({'type': 'bar', 'payload': decorated})
+    
+    async def process_okx_tick(self, bid, ask, ts):
+        bar = self.agg.on_okx_tick(bid, ask, ts)
+        if bar:
+            self.agg.save_bar(bar)
+            decorated = self._decorate_bar(bar)
+
+            # Check Auto Trade
+            if decorated.get('signal') and params.get('autoTrade', False):
+                signal = decorated['signal']
+                print(f"[AutoTrade] Triggering {signal} based on spread {bar['spread']:.2f} vs EMA {bar['ema']:.2f}")
+                # Execute asynchronously
+                loop = asyncio.get_running_loop()
+                loop.call_soon(lambda: self.execute_trade(signal))
+
+            await broadcast({'type': 'bar', 'payload': decorated})
 
     async def run_scheduler(self):
         """Monitor market open/close and trigger resync."""
@@ -757,15 +832,6 @@ class Feeder:
             
          except Exception as e:
              print(f"Resync failed: {e}")
-
-    def _decorate_bar(self, bar):
-        ema = bar['ema']
-        bands = []
-        for lvl in range(1, params['maxPos'] + 1):
-            upper = ema + params['firstSpread'] + (lvl - 1) * params['nextSpread']
-            lower = ema - params['firstSpread'] - (lvl - 1) * params['nextSpread']
-            bands.append({'upper': upper, 'lower': lower, 'lvl': lvl})
-        return {**bar, 'bands': bands}
 
 feeder = None
 
@@ -960,11 +1026,15 @@ async def main_async():
     app.router.add_get('/lightweight-charts.js', http_lightweight_charts)
     app.router.add_get('/backtest_results.json', http_backtest_results)
 
+    # Configurable host/port for deployment
+    host = os.getenv('HTTP_HOST', '0.0.0.0')
+    port = int(os.getenv('HTTP_PORT', '8765'))
+
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', 8765)
+    site = web.TCPSite(runner, host, port)
     await site.start()
-    print('Frontend + WS on http://localhost:8765 (WS at /ws)')
+    print(f'Frontend + WS running on http://{host}:{port} (WS at /ws)')
 
     while True:
         await asyncio.sleep(3600)
