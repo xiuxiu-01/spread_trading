@@ -37,6 +37,10 @@ class OKXGateway:
         self._latest_ws: Optional[Dict[str, Any]] = None
 
     # Market data
+    def get_last_price(self) -> Optional[float]:
+        t = self.client.fetch_ticker(self.symbol)
+        return float(t['last']) if t and t.get('last') else None
+
     def get_orderbook(self, limit: int = 5) -> Dict[str, Any]:
         ob = self.client.fetch_order_book(self.symbol, limit)
         return {

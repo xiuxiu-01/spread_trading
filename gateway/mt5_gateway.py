@@ -22,6 +22,12 @@ class MT5Gateway:
             pass
 
     # Market data
+    def get_last_price(self) -> Optional[float]:
+        tick = mt5.symbol_info_tick(self.symbol)
+        if tick is None:
+            return None
+        return float(tick.last) if tick.last > 0 else (tick.bid + tick.ask) / 2.0
+
     def get_tick(self) -> Optional[Dict[str, float]]:
         tick = mt5.symbol_info_tick(self.symbol)
         if tick is None:
@@ -33,6 +39,10 @@ class MT5Gateway:
         while True:
             t = self.get_tick()
             if t:
+                # Add 'last' price if available
+                tick = mt5.symbol_info_tick(self.symbol)
+                if tick and tick.last > 0:
+                     t['last'] = float(tick.last)
                 yield t
             time.sleep(0.5)
 

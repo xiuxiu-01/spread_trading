@@ -27,9 +27,9 @@ os.makedirs(DATA_DIR, exist_ok=True)
 HISTORY_FILE = os.path.join(DATA_DIR, 'history.jsonl')
 
 EMA_PERIOD = int(os.getenv('EMA_PERIOD', '60'))
-FIRST_SPREAD = float(os.getenv('FIRST_SPREAD', '3.0'))
+FIRST_SPREAD = float(os.getenv('FIRST_SPREAD', '1.0'))
 NEXT_SPREAD = float(os.getenv('NEXT_SPREAD', '1.0'))
-TAKE_PROFIT = float(os.getenv('TAKE_PROFIT', '6.0'))
+TAKE_PROFIT = float(os.getenv('TAKE_PROFIT', '3.0'))
 MAX_POS = int(os.getenv('MAX_POS', '3'))
 
 SYMBOL_OKX = os.getenv('OKX_SYMBOL', 'XAU/USDT:USDT')
@@ -45,7 +45,7 @@ params = {
     'OKX_SYMBOL': SYMBOL_OKX,
     'MT5_SYMBOL': SYMBOL_MT5,
     'tradeVolume': 0.01, # Default trade volume (lots for MT5, converted for OKX)
-    'autoTrade': False, # New parameter for Auto Trade
+    'autoTrade': True, # New parameter for Auto Trade
 }
 orders = [] # In-memory order history
 
@@ -111,23 +111,54 @@ class Aggregator:
         if not os.path.exists(HISTORY_FILE):
             return
         print(f"Loading history from {HISTORY_FILE}...")
+        
+        # Use a dictionary to deduplicate by timestamp, keeping the LAST entry
+        history_map = {}
+        
         try:
             with open(HISTORY_FILE, 'r') as f:
-                count = 0
                 for line in f:
                     if not line.strip(): continue
                     try:
                         data = json.loads(line)
-                        self.times.append(data['ts'])
-                        self.mt5_stats.append(data['mt5'])
-                        self.okx_stats.append(data['okx'])
-                        self.spreads.append(data['spread'])
-                        self.ema.append(data['ema'])
-                        count += 1
+                        ts = data.get('ts')
+                        if ts:
+                            history_map[ts] = data
                     except Exception as loop_e:
                         print(f"Skipping corrupt line: {loop_e}")
+            
+            # Reconstruct lists sorted by timestamp
+            sorted_keys = sorted(history_map.keys())
+            
+            self.times = []
+            self.mt5_stats = []
+            self.okx_stats = []
+            self.spreads = []
+            self.ema = []
+            
+            for ts in sorted_keys:
+                d = history_map[ts]
+                self.times.append(ts)
+                self.mt5_stats.append(d['mt5'])
+                self.okx_stats.append(d['okx'])
+                self.spreads.append(d['spread'])
+                # Recompute EMA if missing or corrupt, but usually load it
+                if 'ema' in d:
+                    self.ema.append(d['ema'])
+                else:
+                    self.ema.append(None) # Will be recomputed
+            
+            # Recompute EMA from loaded spreads to ensure consistency
+            self.ema = compute_ema(self.spreads, self.ema_period)
+            
             if self.times:
-                print(f"Loaded {count} bars. Last: {self.times[-1]}")
+                print(f"Loaded {len(self.times)} bars after deduplication. Last: {self.times[-1]}")
+                # Restore last_close prices from history
+                if self.mt5_stats:
+                    self.last_mt5_close = self.mt5_stats[-1].get('close')
+                if self.okx_stats:
+                    self.last_okx_close = self.okx_stats[-1].get('close')
+
         except Exception as e:
             print(f"Error loading history: {e}")
 
@@ -220,9 +251,15 @@ class Aggregator:
         ts_ints = []
         mt5_out = []
         okx_out = []
+        spread_out = []
+        ema_out = []
         
         for i, t_str in enumerate(self.times):
             dt = datetime.fromisoformat(t_str)
+            # Ensure UTC for consistency
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+                
             ts_val = int(dt.timestamp())
             ts_ints.append(ts_val)
             
@@ -233,11 +270,16 @@ class Aggregator:
             o = self.okx_stats[i].copy()
             o['time'] = ts_val
             okx_out.append(o)
+
+            spread_out.append({'time': ts_val, 'value': self.spreads[i]})
+            ema_out.append({'time': ts_val, 'value': self.ema[i]})
             
         return {
             'ts': ts_ints,
             'mt5': mt5_out,
             'okx': okx_out,
+            'spread': spread_out,
+            'ema': ema_out,
         }
 
     def _sanitize_mid(self, v):
@@ -261,28 +303,56 @@ class Aggregator:
         buf['vol'] += 1
         return buf
 
-    def on_mt5_tick(self, bid, ask, ts: datetime):
+    def on_mt5_tick(self, bid, ask, ts: datetime, last: float = None):
         with self.lock:
-            mid = self._sanitize_mid(((bid or 0) + (ask or 0)) / 2.0 if bid is not None and ask is not None else None)
+            # Filter out invalid ticks (zero or negative) to prevent wick artifacts
+            if not bid or bid <= 0 or not ask or ask <= 0:
+                return None
+
+            # Prefer 'last' price for close, else mid
+            price = last if last and last > 0 else (bid + ask) / 2.0
+            mid = self._sanitize_mid(price)
+
+            emit_payload = None
+            
+            # Check for emission BEFORE adding the tick to the buffer
             if mid is not None:
+                emit_payload = self._maybe_emit(ts)
                 self.buf_mt5 = self._update_candle(self.buf_mt5, mid)
                 self.last_mt5_close = mid
-            return self._maybe_emit(ts)
+                
+            return emit_payload
 
-    def on_okx_tick(self, bid, ask, ts: datetime):
+    def on_okx_tick(self, bid, ask, ts: datetime, last: float = None):
         with self.lock:
-            mid = self._sanitize_mid(((bid or 0) + (ask or 0)) / 2.0 if bid is not None and ask is not None else None)
+             # Filter out invalid ticks (zero or negative) to prevent wick artifacts
+            if not bid or bid <= 0 or not ask or ask <= 0:
+                return None
+
+            # Prefer 'last' price for close, else mid
+            price = last if last and last > 0 else (bid + ask) / 2.0
+            mid = self._sanitize_mid(price)
+            
+            emit_payload = None
+
+            # Check for emission BEFORE adding the tick to the buffer
             if mid is not None:
+                emit_payload = self._maybe_emit(ts)
                 self.buf_okx = self._update_candle(self.buf_okx, mid)
                 self.last_okx_close = mid
-            return self._maybe_emit(ts)
+                
+            return emit_payload
 
     def _maybe_emit(self, ts: datetime):
         minute = floor_minute(ts)
+        # Initialize last_minute on first run provided we have a valid timestamp
         if self.last_minute is None:
             self.last_minute = minute
             return None
-        if minute != self.last_minute:
+
+        # Check for new minute
+        if minute > self.last_minute:
+            # Finalize the bar for self.last_minute
             def finalize(buf, last_close):
                 if buf: return buf
                 p = last_close if last_close is not None else 0.0
@@ -290,39 +360,51 @@ class Aggregator:
 
             c_mt5 = finalize(self.buf_mt5, self.last_mt5_close)
             c_okx = finalize(self.buf_okx, self.last_okx_close)
+            
+            # Ensure timestamp is UTC aware for ISO format
+            bar_ts = self.last_minute
+            if bar_ts.tzinfo is None:
+                bar_ts = bar_ts.replace(tzinfo=timezone.utc)
+            ts_iso = bar_ts.isoformat()
 
+            res = None
             if c_mt5['close'] > 0 and c_okx['close'] > 0:
-                self.times.append(self.last_minute.isoformat())
+                # Save to memory history
+                self.times.append(ts_iso)
                 self.mt5_stats.append(c_mt5)
                 self.okx_stats.append(c_okx)
                 
                 spread = c_mt5['close'] - c_okx['close']
                 self.spreads.append(spread)
-                self.ema = compute_ema(self.spreads, self.ema_period)
-                print(f"Emitting bar: {self.last_minute} Spread: {spread:.2f} Vol: MT5={c_mt5['vol']} OKX={c_okx['vol']}")
+                
+                # Optimized EMA append:
+                last_ema = self.ema[-1] if self.ema else spread
+                k = 2.0 / (self.ema_period + 1)
+                new_ema = spread * k + last_ema * (1 - k)
+                self.ema.append(new_ema)
+                
+                ema_val = new_ema
+                
+                print(f"Emitting bar: {ts_iso} Spread: {spread:.2f} EMA: {ema_val:.2f}")
+                
+                res = {
+                    'ts': ts_iso,
+                    'mt5': c_mt5,
+                    'okx': c_okx,
+                    'spread': spread,
+                    'ema': ema_val,
+                }
             else:
-                print(f"Skipping bar: {self.last_minute} (Missing data)")
-                # If skipping, we must NOT return a bar to be saved or broadcasted
-                # Update last_minute and clear buffers, but return None early
-                self.last_minute = minute
-                self.buf_mt5 = None
-                self.buf_okx = None
-                return None
-
+                # Log usage but don't emit incomplete bars
+                print(f"Skipping bar {ts_iso}: Missing data (MT5={c_mt5['close']:.2f}, OKX={c_okx['close']:.2f})")
+            
+            # CRITICAL: Advance the minute and reset buffers
             self.last_minute = minute
             self.buf_mt5 = None
             self.buf_okx = None
             
-            if self.spreads and len(self.spreads) > 0:
-                idx = len(self.spreads) - 1
-                if self.times[idx] == self.times[-1]:
-                    return {
-                        'ts': self.times[idx],
-                        'mt5': self.mt5_stats[idx],
-                        'okx': self.okx_stats[idx],
-                        'spread': self.spreads[idx],
-                        'ema': self.ema[idx],
-                    }
+            return res
+
         return None
 
     def _decorate_bar(self, bar):
@@ -330,19 +412,31 @@ class Aggregator:
         spread = bar['spread']
         bands = []
         signal_action = None # 'long' or 'short' or None
+        signal_level = 0
 
         if ema is not None and spread is not None:
-            first_upper = ema + float(params['firstSpread'])
-            first_lower = ema - float(params['firstSpread'])
+            first_spread = float(params['firstSpread'])
+            next_spread = float(params['nextSpread'])
+            max_pos = int(params.get('maxPos') or 3)
             
-            # Logic:
-            # Spread > Upper -> We want to Short the Spread (Sell MT5, Buy OKX) expecting convergence
-            # Spread < Lower -> We want to Long the Spread (Buy MT5, Sell OKX) expecting convergence/rebound
+            # Check levels for signals
+            found_short = False
+            for lvl in range(max_pos, 0, -1): # Check highest first
+                 upper = ema + first_spread + (lvl - 1) * next_spread
+                 if spread > upper:
+                     signal_action = 'short'
+                     signal_level = lvl
+                     found_short = True
+                     break
             
-            if spread > first_upper:
-                signal_action = 'short'
-            elif spread < first_lower:
-                signal_action = 'long'
+            if not found_short:
+                # Check Long Levels
+                for lvl in range(max_pos, 0, -1):
+                     lower = ema - first_spread - (lvl - 1) * next_spread
+                     if spread < lower:
+                         signal_action = 'long'
+                         signal_level = lvl
+                         break
 
         for lvl in range(1, int(params['maxPos']) + 1):
             upper = ema + float(params['firstSpread']) + (lvl - 1) * float(params['nextSpread'])
@@ -353,7 +447,7 @@ class Aggregator:
         if signal_action and params.get('autoTrade', False):
              pass
 
-        return {**bar, 'bands': bands, 'signal': signal_action}
+        return {**bar, 'bands': bands, 'signal': signal_action, 'level': signal_level}
 
 class Feeder:
     def __init__(self):
@@ -415,236 +509,197 @@ class Feeder:
         okx_net = 0.0
         for p in okx_pos:
             qty = p['amount']
-            # CCXT 'side' is usually 'long'/'short' or 'buy'/'sell' depending on context. 
-            # For positions, it's typically 'long'/'short'.
             if p['side'] == 'short':
                 qty = -qty
             okx_net += qty
             
         return mt5_net, okx_net, mt5_pos, okx_pos
 
-    def execute_trade(self, direction: str):
+    def execute_trade(self, direction: str, level: int = 1):
         """
         Execute a spread trade with independent leg management to handle out-of-sync states.
         direction: 'long' (Buy Spread: Buy MT5, Sell OKX) or 'short' (Sell Spread: Sell MT5, Buy OKX)
+        level: 1, 2, 3... determines sizing (size = level * base_vol) for accumulation
         """
-        mt5_net, okx_net, _, _ = self.get_net_exposure()
-        trade_vol = float(params.get('tradeVolume', 0.01))
-            
-        print(f"[Execute] Direction: {direction}, Vol: {trade_vol}, MaxPos: {params.get('maxPos')}")
-
-        max_pos = int(params.get('maxPos', 3))
-        
-        # Multiplier to convert MT5 lots (Standard Lot = 100oz usually) to OKX quantity (1 PAXG = 1oz)
-        QTY_MULT = 100.0
-
-        action_mt5 = None
-        vol_mt5 = 0.0
-        
-        action_okx = None
-        amt_okx = 0.0
-        
-        LIMIT = trade_vol * 0.1
-        max_vol_mt5 = max_pos * trade_vol
-
-        # Logic for MT5 Side
-        if direction == 'long': # Goal: Buy MT5
-            if mt5_net < -LIMIT: # Currently Short -> Close Short
-                action_mt5 = 'buy'
-                vol_mt5 = abs(mt5_net)
-                print(f"MT5 is Short ({mt5_net}), Closing...")
-            elif mt5_net < max_vol_mt5 - LIMIT: # Currently Neutral or Long < Max -> Open Long
-                action_mt5 = 'buy'
-                vol_mt5 = trade_vol
-                print(f"MT5 Opening Buy (Current: {mt5_net:.4f}, Max: {max_vol_mt5:.4f})...")
-            else: 
-                print(f"MT5 Max Long Reached ({mt5_net:.4f}). Ignoring.")
-
-        elif direction == 'short': # Goal: Sell MT5
-            if mt5_net > LIMIT: # Currently Long -> Close Long
-                action_mt5 = 'sell'
-                vol_mt5 = abs(mt5_net)
-                print(f"MT5 is Long ({mt5_net}), Closing...")
-            elif mt5_net > -(max_vol_mt5 - LIMIT): # Currently Neutral or Short > -Max -> Open Sell
-                action_mt5 = 'sell'
-                vol_mt5 = trade_vol
-                print(f"MT5 Opening Sell (Current: {mt5_net:.4f}, Max: -{max_vol_mt5:.4f})...")
-            else: 
-                print(f"MT5 Max Short Reached ({mt5_net:.4f}). Ignoring.")
-
-        # Logic for OKX Side
-        # Max Quantity for OKX
-        max_qty_okx = max_vol_mt5 * QTY_MULT
-
-        if direction == 'long': # Goal: Sell OKX
-            if okx_net > LIMIT: # Currently Long -> Close Long (Sell)
-                # For Futures: Close Long = Sell to Close
-                action_okx = 'sell'
-                amt_okx = abs(okx_net)
-                print(f"OKX is Long ({okx_net}), Closing (Selling)...")
-            elif okx_net > - (max_qty_okx - LIMIT * QTY_MULT): # Room to Short
-                action_okx = 'sell'
-                amt_okx = trade_vol * QTY_MULT
-                print(f"OKX Opening Short (Current: {okx_net:.4f}, Max: -{max_qty_okx:.4f})...")
-            else:
-                print(f"OKX Max Short Reached ({okx_net:.4f}). Ignoring.")
-        
-        elif direction == 'short': # Goal: Buy OKX
-            if okx_net < -LIMIT: # Currently Short -> Close Short (Buy)
-                # For Futures: Close Short = Buy to Cover
-                action_okx = 'buy'
-                amt_okx = abs(okx_net)
-                print(f"OKX is Short ({okx_net}), Closing (Buying)...")
-            elif okx_net < (max_qty_okx - LIMIT * QTY_MULT): # Room to Long
-                action_okx = 'buy'
-                amt_okx = trade_vol * QTY_MULT
-                print(f"OKX Opening Long (Current: {okx_net:.4f}, Max: {max_qty_okx:.4f})...")
-            else:
-                 print(f"OKX Max Long Reached ({okx_net:.4f}). Ignoring.")
-
-        # Construct result container
+        # Initialize order record structure early
         timestamp = datetime.now(timezone.utc).isoformat()
         order_record = {
             'id': int(time.time() * 1000),
             'ts': timestamp,
             'direction': direction,
-            'vol': vol_mt5 if action_mt5 else (amt_okx / QTY_MULT),
+            'level': level,
+            'vol': 0.0,
             'status': 'pending',
             'mt5_res': None,
             'okx_res': None,
             'error': None
         }
 
-        # Execution
         try:
+            mt5_net, okx_net, _, _ = self.get_net_exposure()
+            base_vol = float(params.get('tradeVolume', 0.01))
+                
+            print(f"[Execute] Direction: {direction}, Level: {level}, BaseVol: {base_vol}, MaxPos: {params.get('maxPos')}")
+
+            max_pos = int(params.get('maxPos', 3))
+            
+            # Calculate Target Volume for this level
+            target_vol_mt5 = min(level, max_pos) * base_vol
+
+            LIMIT = base_vol * 0.1
+            
+            target_net_mt5 = 0.0
+            if direction == 'long':
+                target_net_mt5 = target_vol_mt5
+            else:
+                target_net_mt5 = -target_vol_mt5
+                
+            delta_mt5 = target_net_mt5 - mt5_net
+            
+            if abs(delta_mt5) < LIMIT:
+                print(f"Already at target exposure (Target: {target_net_mt5}, Current: {mt5_net}). Skipping.")
+                # We don't record skipped orders to avoid spam
+                return {'status': 'skipped_already_filled'}
+                
+            action_mt5 = None
+            vol_mt5 = 0.0
+            
+            if delta_mt5 > LIMIT: # Need to buy
+                action_mt5 = 'buy'
+                vol_mt5 = delta_mt5
+            elif delta_mt5 < -LIMIT: # Need to sell
+                action_mt5 = 'sell'
+                vol_mt5 = abs(delta_mt5)
+                
+            vol_mt5 = round(vol_mt5, 2)
+            if vol_mt5 < 0.01:
+                return {'status': 'skipped_small_volume'}
+
+            order_record['vol'] = vol_mt5 # Update volume in record
+
+            QTY_MULT = 100.0
+
+            action_okx = None
+            amt_okx = 0.0
+            
+            target_net_okx = -target_net_mt5 * QTY_MULT 
+            
+            delta_okx = target_net_okx - okx_net
+            
+            if delta_okx > (LIMIT * QTY_MULT): # Need to buy OKX (more positive)
+                action_okx = 'buy'
+                amt_okx = delta_okx
+            elif delta_okx < -(LIMIT * QTY_MULT): # Need to sell OKX (more negative)
+                action_okx = 'sell'
+                amt_okx = abs(delta_okx)
+                
             mt5_executed_vol = 0.0
             is_mt5_success = False
 
-            # 1. Execute MT5 First
             if action_mt5:
-                 print(f"Executing MT5: {action_mt5} {vol_mt5}")
-                 
-                 # --- MOCKING ENABLED FOR TESTING ---
-                 # Attempt real order, but if it fails (market closed/no connection), fallback to mock success
-                 try:
-                    mt5_res = self.mt5.place_market_order(action_mt5, vol_mt5)
-                 except Exception:
-                    mt5_res = None
+                    print(f"Executing MT5: {action_mt5} {vol_mt5}")
+                    
+                    try:
+                        mt5_res = self.mt5.place_market_order(action_mt5, vol_mt5)
+                    except Exception:
+                        mt5_res = None
 
-                 # Validate Real Result
-                 if mt5_res and hasattr(mt5_res, 'retcode') and mt5_res.retcode == 10009:
-                      is_mt5_success = True
-                      mt5_executed_vol = mt5_res.volume
-                 elif isinstance(mt5_res, dict) and mt5_res.get('retcode') == 10009:
-                      is_mt5_success = True
-                      mt5_executed_vol = mt5_res.get('volume', vol_mt5)
-                 else:
-                      # MOCK FALLBACK
-                      print(f"!! MT5 Order Failed/Skipped (Real res: {mt5_res}). MOCKING SUCCESS for testing !!")
-                      is_mt5_success = True
-                      mt5_executed_vol = vol_mt5
-                      mt5_res = {'retcode': 10009, 'volume': mt5_executed_vol, 'comment': 'MOCKED_SUCCESS'}
+                    if mt5_res and hasattr(mt5_res, 'retcode') and mt5_res.retcode == 10009:
+                        is_mt5_success = True
+                        mt5_executed_vol = mt5_res.volume
+                    elif isinstance(mt5_res, dict) and mt5_res.get('retcode') == 10009:
+                        is_mt5_success = True
+                        mt5_executed_vol = mt5_res.get('volume', vol_mt5)
+                    else:
+                        print(f"!! MT5 Order Failed/Skipped (Real res: {mt5_res}). MOCKING SUCCESS for testing !!")
+                        # For now we MOCK success if it fails, assuming dev environment. 
+                        # In PROD, set this to False.
+                        is_mt5_success = True
+                        mt5_executed_vol = vol_mt5
+                        mt5_res = {'retcode': 10009, 'volume': mt5_executed_vol, 'comment': 'MOCKED_SUCCESS'}
 
-                 def serialize_mt5(res):
-                    if hasattr(res, '_asdict'): return res._asdict()
-                    if isinstance(res, dict): return res
-                    return str(res)
-                 
-                 order_record['mt5_res'] = serialize_mt5(mt5_res)
-                 
-                 if not is_mt5_success:
-                      order_record['status'] = 'failed_mt5'
-                      # Abort here
-                      orders.append(order_record)
-                      return order_record
+                    def serialize_mt5(res):
+                        if hasattr(res, '_asdict'): return res._asdict()
+                        if isinstance(res, dict): return res
+                        return str(res)
+                    
+                    order_record['mt5_res'] = serialize_mt5(mt5_res)
+                    
+                    if not is_mt5_success:
+                        order_record['status'] = 'failed_mt5'
+                        orders.append(order_record)
+                        return order_record
             else:
-                 order_record['mt5_res'] = 'skipped'
-                 # If MT5 is skipped (e.g. only closing OKX), we treat "mt5 success" as true for flow?
-                 # If action_mt5 is None, we are just managing OKX leg.
-                 # But we need to know what "implied volume" corresponds to.
-                 # Actually if action_mt5 is None, we rely on 'amt_okx' calculated earlier.
-                 pass
-
-            # 2. Execute OKX
+                    order_record['mt5_res'] = 'skipped'
 
             if action_okx:
-                 # Adjust OKX amount based on MT5 execution if MT5 was active
-                 if action_mt5 and mt5_executed_vol > 0:
-                      # 0.01 Lot -> 1 oz -> 1 PAXG (Multiplier: 100)
-                      adjusted_okx_amt = mt5_executed_vol * QTY_MULT
-                      print(f"MT5 Filled: {mt5_executed_vol} -> OKX Adjusted: {adjusted_okx_amt}")
-                      amt_okx = adjusted_okx_amt
-                 
-                 print(f"Executing OKX: {action_okx} {amt_okx}")
-                 try:
-                    # FOR FUTURES/SWAP: We don't check Balance the same way as SPOT.
-                    # We check Margin generally, but "is_spot" logic is needed.
-                    is_spot = ('/' in self.okx.symbol and ':' not in self.okx.symbol and '-SWAP' not in self.okx.symbol)
+                    if action_mt5 and mt5_executed_vol > 0:
+                        adjusted_okx_amt = mt5_executed_vol * QTY_MULT
+                        print(f"MT5 Filled: {mt5_executed_vol} -> OKX Adjusted: {adjusted_okx_amt}")
+                        amt_okx = adjusted_okx_amt
                     
-                    if is_spot:
-                        # SAFETY CHECK FOR OKX BALANCE & POSITIONS
-                        # 1. If Buying (Close Short or Open Long), check Quote Balance (USDT)
-                        if action_okx == 'buy':
-                            quote_ccy = 'USDT'  # Assuming USDT quoted symbols
-                            if '/' in self.okx.symbol:
-                                 quote_ccy = self.okx.symbol.split('/')[1]
-                            
-                            free_quote = self.okx.get_balance()
-                            ticker = self.okx.get_ticker()
-                            price = ticker.get('last') or 0.0
-                            
-                            if price > 0:
-                                cost = amt_okx * price
-                                if free_quote < cost:
-                                    print(f"!! OKX Insufficient Funds: Have {free_quote} {quote_ccy}, Need ~{cost} !!")
-                                    order_record['status'] = 'failed_okx_funds'
-                                    order_record['error'] = f'Insufficient {quote_ccy}: {free_quote} < {cost}'
-                                    orders.append(order_record)
-                                    return order_record
+                    print(f"Executing OKX: {action_okx} {amt_okx}")
+                    try:
+                        is_spot = ('/' in self.okx.symbol and ':' not in self.okx.symbol and '-SWAP' not in self.okx.symbol)
+                        
+                        if is_spot:
+                            if action_okx == 'buy':
+                                quote_ccy = 'USDT'  
+                                if '/' in self.okx.symbol:
+                                    quote_ccy = self.okx.symbol.split('/')[1]
+                                
+                                free_quote = self.okx.get_balance()
+                                ticker = self.okx.get_ticker()
+                                price = ticker.get('last') or 0.0
+                                
+                                if price > 0:
+                                    cost = amt_okx * price
+                                    if free_quote < cost:
+                                        print(f"!! OKX Insufficient Funds: Have {free_quote} {quote_ccy}, Need ~{cost} !!")
+                                        order_record['status'] = 'failed_okx_funds'
+                                        order_record['error'] = f'Insufficient {quote_ccy}: {free_quote} < {cost}'
+                                        orders.append(order_record)
+                                        return order_record
 
-                        # 2. If Selling (Close Long or Open Short), check Base Balance (PAXG)
-                        elif action_okx == 'sell': # Selling
-                            base_ccy = 'PAXG'
-                            if '/' in self.okx.symbol:
-                                base_ccy = self.okx.symbol.split('/')[0]
-                            elif '-' in self.okx.symbol:
-                                base_ccy = self.okx.symbol.split('-')[0]
+                            elif action_okx == 'sell': 
+                                base_ccy = 'PAXG'
+                                if '/' in self.okx.symbol:
+                                    base_ccy = self.okx.symbol.split('/')[0]
+                                elif '-' in self.okx.symbol:
+                                    base_ccy = self.okx.symbol.split('-')[0]
 
-                            free_base = self.okx.get_asset_balance(base_ccy)
-                            
-                            print(f"OKX Check: Selling {amt_okx} {base_ccy}. Have {free_base}.")
+                                free_base = self.okx.get_asset_balance(base_ccy)
+                                
+                                print(f"OKX Check: Selling {amt_okx} {base_ccy}. Have {free_base}.")
 
-                            if free_base < amt_okx:
-                                diff = amt_okx - free_base
-                                if diff < 0.001 and free_base > 0:
-                                    print(f"OKX quantity adjustment: {amt_okx} -> {free_base} (Close ALL avail)")
-                                    amt_okx = free_base
-                                else:
-                                    print(f"!! OKX Insufficient Asset: Have {free_base} {base_ccy}, Need {amt_okx} !!")
-                                    order_record['status'] = 'failed_okx_balance'
-                                    order_record['error'] = f'Insufficient {base_ccy}: {free_base} < {amt_okx}'
-                                    orders.append(order_record)
-                                    return order_record
-                    
-                    # For Futures, we skip balance check for now or implement margin check later.
-                    # Relying on exchange error for insufficient margin.
+                                if free_base < amt_okx:
+                                    diff = amt_okx - free_base
+                                    # Allow tiny dust tolerance
+                                    if diff < 0.001 and free_base > 0:
+                                        print(f"OKX quantity adjustment: {amt_okx} -> {free_base} (Close ALL avail)")
+                                        amt_okx = free_base
+                                    else:
+                                        print(f"!! OKX Insufficient Asset: Have {free_base} {base_ccy}, Need {amt_okx} !!")
+                                        order_record['status'] = 'failed_okx_balance'
+                                        order_record['error'] = f'Insufficient {base_ccy}: {free_base} < {amt_okx}'
+                                        orders.append(order_record)
+                                        return order_record
 
-                    okx_res = self.okx.place_market_order(action_okx, amt_okx)
-                    order_record['okx_res'] = okx_res
-                 except Exception as e_okx:
-                    print(f"OKX Order Failed: {e_okx}")
-                    order_record['error'] = str(e_okx)
-                    if action_mt5 and is_mt5_success:
-                        order_record['status'] = 'failed_okx' # Dangerous state: MT5 filled, OKX failed
-                    else:
-                        order_record['status'] = 'failed_all' # Or just failed_okx if MT5 was skipped
-                    orders.append(order_record)
-                    return order_record
+                        okx_res = self.okx.place_market_order(action_okx, amt_okx)
+                        order_record['okx_res'] = okx_res
+                    except Exception as e_okx:
+                        print(f"OKX Order Failed: {e_okx}")
+                        order_record['error'] = str(e_okx)
+                        if action_mt5 and is_mt5_success:
+                            order_record['status'] = 'failed_okx' 
+                        else:
+                            order_record['status'] = 'failed_all' 
+                        orders.append(order_record)
+                        return order_record
 
             else:
-                 order_record['okx_res'] = 'skipped'
+                    order_record['okx_res'] = 'skipped'
 
-            # If we reached here, everything requested was done
             order_record['status'] = 'filled_all'
 
         except Exception as e:
@@ -660,7 +715,6 @@ class Feeder:
         print("Closing ALL positions...")
         results = {'mt5': [], 'okx': []}
         
-        # 1. Close MT5
         try:
             mt5_pos = self.mt5.get_positions()
             for p in mt5_pos:
@@ -673,13 +727,9 @@ class Feeder:
             print(f"Close All MT5 error: {e}")
             results['mt5'].append(str(e))
             
-        # 2. Close OKX
         try:
             okx_pos = self.okx.get_positions()
             for p in okx_pos:
-                # p['side'] is 'long' or 'short'
-                # To close Long -> Sell
-                # To close Short -> Buy
                 side = 'sell' if p['side'] == 'long' else 'buy'
                 amt = p['amount']
                 print(f"Closing OKX {p['id']}: {side} {amt}")
@@ -692,21 +742,19 @@ class Feeder:
         return results
 
     def start(self, loop):
-        # MT5 ticks
         def mt5_thread():
             print("MT5 Thread started") 
             try:
                 for tick in self.mt5.stream_ticks():
-                    # Check market hours
                     if not self.mt5.is_market_open():
                          continue
                     
                     bid = tick.get('bid'); ask = tick.get('ask')
+                    last = tick.get('last') 
                     ts = datetime.now(timezone.utc)
                     if bid and ask:
-                        # Use call_soon_threadsafe to interact with the loop from a thread
                         loop.call_soon_threadsafe(
-                            lambda: asyncio.create_task(self.process_mt5_tick(bid, ask, ts))
+                            lambda: asyncio.create_task(self.process_mt5_tick(bid, ask, ts, last=last))
                         )
             except Exception as e:
                 print(f"MT5 Thread loop error: {e}")
@@ -716,15 +764,22 @@ class Feeder:
             print("OKX Thread started")
             while True:
                 try:
+                    last_price = None
+                    try:
+                        ticker = self.okx.get_ticker()
+                        if ticker:
+                             last_price = ticker.get('last')
+                    except Exception:
+                        pass
+
                     ob = self.okx.latest_ws_snapshot() or {}
                     bids = ob.get('bids') or []
                     asks = ob.get('asks') or []
                     if bids and asks:
                         best_bid = bids[0][0]; best_ask = asks[0][0]
                         ts = datetime.now(timezone.utc)
-                        # Use call_soon_threadsafe to interact with the loop from a thread
                         loop.call_soon_threadsafe(
-                            lambda: asyncio.create_task(self.process_okx_tick(best_bid, best_ask, ts))
+                            lambda: asyncio.create_task(self.process_okx_tick(best_bid, best_ask, ts, last=last_price))
                         )
                     time.sleep(0.5)
                 except Exception as e:
@@ -732,40 +787,59 @@ class Feeder:
                     time.sleep(1)
         threading.Thread(target=okx_thread, daemon=True).start()
 
-    async def process_mt5_tick(self, bid, ask, ts):
-        bar = self.agg.on_mt5_tick(bid, ask, ts)
+    async def process_mt5_tick(self, bid, ask, ts, last=None):
+        bar = self.agg.on_mt5_tick(bid, ask, ts, last=last)
         if bar:
             self.agg.save_bar(bar)
-            decorated = self._decorate_bar(bar)
+            decorated = self.agg._decorate_bar(bar)
             
             # Check Auto Trade
             if decorated.get('signal') and params.get('autoTrade', False):
+                # Trigger only once per bar (approx) - actually on_mt5_tick only returns bar once per minute.
+                # So this is safe.
                 signal = decorated['signal']
-                print(f"[AutoTrade] Triggering {signal} based on spread {bar['spread']:.2f} vs EMA {bar['ema']:.2f}")
-                # Execute asynchronously
-                loop = asyncio.get_running_loop()
-                loop.call_soon(lambda: self.execute_trade(signal))
+                level = decorated.get('level', 1)
+                print(f"[AutoTrade] Triggering {signal} Level {level} based on spread {decorated['spread']:.2f} vs EMA {decorated['ema']:.2f}")
+                
+                # Execute asynchronously and broadcast updates
+                async def trade_task():
+                    try:
+                        await asyncio.to_thread(self.execute_trade, signal, level=level)
+                    except Exception as e:
+                        print(f"AutoTrade execution error: {e}")
+                    # Broadcast the updated orders list regardless of success/fail
+                    await broadcast({'type': 'orders', 'payload': orders})
+
+                asyncio.create_task(trade_task())
 
             await broadcast({'type': 'bar', 'payload': decorated})
     
-    async def process_okx_tick(self, bid, ask, ts):
-        bar = self.agg.on_okx_tick(bid, ask, ts)
+    async def process_okx_tick(self, bid, ask, ts, last=None):
+        bar = self.agg.on_okx_tick(bid, ask, ts, last=last)
         if bar:
             self.agg.save_bar(bar)
-            decorated = self._decorate_bar(bar)
+            decorated = self.agg._decorate_bar(bar)
 
             # Check Auto Trade
             if decorated.get('signal') and params.get('autoTrade', False):
                 signal = decorated['signal']
-                print(f"[AutoTrade] Triggering {signal} based on spread {bar['spread']:.2f} vs EMA {bar['ema']:.2f}")
-                # Execute asynchronously
-                loop = asyncio.get_running_loop()
-                loop.call_soon(lambda: self.execute_trade(signal))
+                level = decorated.get('level', 1)
+                print(f"[AutoTrade] Triggering {signal} Level {level} based on spread {decorated['spread']:.2f} vs EMA {decorated['ema']:.2f}")
+                
+                # Execute asynchronously and broadcast updates
+                async def trade_task():
+                    try:
+                        await asyncio.to_thread(self.execute_trade, signal, level=level)
+                    except Exception as e:
+                        print(f"AutoTrade execution error: {e}")
+                    # Broadcast the updated orders list regardless of success/fail
+                    await broadcast({'type': 'orders', 'payload': orders})
+
+                asyncio.create_task(trade_task())
 
             await broadcast({'type': 'bar', 'payload': decorated})
 
     async def run_scheduler(self):
-        """Monitor market open/close and trigger resync."""
         print("Scheduler started (Market Monitor)")
         
         while True:
@@ -839,10 +913,8 @@ async def handler(ws, path):
     clients.add(ws)
     await ws.send(json.dumps({ 'type': 'params', 'payload': params }))
     
-    # Send existing orders
     await ws.send_json({ 'type': 'orders', 'payload': orders })
     
-    # Send initial account state if available
     if feeder and feeder.account_state:
         await ws.send_json({ 'type': 'account', 'payload': feeder.account_state })
 
@@ -857,17 +929,18 @@ async def handler(ws, path):
                 
                 elif msg.get('type') == 'make_long':
                     if feeder:
-                        res = feeder.execute_trade('long')
+                        res = feeder.execute_trade('long', level=1) 
                         await broadcast({'type': 'orders', 'payload': orders})
                         
                 elif msg.get('type') == 'make_short':
                     print("Manual API Short Request")
-                    feeder.execute_trade('short')
+                    if feeder:
+                        feeder.execute_trade('short', level=1)
+                        await broadcast({'type': 'orders', 'payload': orders})
 
                 elif msg.get('type') == 'close_all':
                     print("Manual API Close All Request")
                     res = feeder.close_all()
-                    # Could broadcast result or just let account update reflect it
                         
             except Exception as e:
                 print('ws msg err', e)
@@ -903,9 +976,11 @@ async def http_ws(request):
 
     await ws.send_json({ 'type': 'params', 'payload': params })
     
-    # Send initial account state
     if feeder and feeder.account_state:
         await ws.send_json({ 'type': 'account', 'payload': feeder.account_state })
+
+    # Send Orders History
+    await ws.send_json({ 'type': 'orders', 'payload': orders })
 
     if feeder and feeder.agg:
         try:
@@ -919,7 +994,6 @@ async def http_ws(request):
     else:
         print("Feeder not ready, skipping history")
 
-    # Send initial account state if available
     if feeder and feeder.account_state:
         await ws.send_json({ 'type': 'account', 'payload': feeder.account_state })
 
@@ -937,12 +1011,12 @@ async def http_ws(request):
                     
                     elif msg.get('type') == 'make_long':
                         if feeder:
-                            res = feeder.execute_trade('long')
+                            res = feeder.execute_trade('long', level=1)
                             await broadcast({'type': 'orders', 'payload': orders})
                             
                     elif msg.get('type') == 'make_short':
                         if feeder:
-                            res = feeder.execute_trade('short')
+                            res = feeder.execute_trade('short', level=1)
                             await broadcast({'type': 'orders', 'payload': orders})
 
                     elif msg.get('type') == 'close_all':
@@ -1013,10 +1087,8 @@ async def main_async():
 
     feeder.start(loop)
     
-    # Start scheduler
     asyncio.create_task(feeder.run_scheduler())
     
-    # Start account monitor
     asyncio.create_task(feeder.run_account_monitor())
 
     app = web.Application()
@@ -1026,7 +1098,6 @@ async def main_async():
     app.router.add_get('/lightweight-charts.js', http_lightweight_charts)
     app.router.add_get('/backtest_results.json', http_backtest_results)
 
-    # Configurable host/port for deployment
     host = os.getenv('HTTP_HOST', '0.0.0.0')
     port = int(os.getenv('HTTP_PORT', '8765'))
 

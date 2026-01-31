@@ -173,7 +173,7 @@
 
     <div class="container">
         <div class="charts-column">
-            <div class="chart-container" style="flex: 3;">
+            <div class="chart-container" style="flex: 2;">
                 <h3 class="chart-title">Price Candles (MT5 vs OKX)</h3>
                 <div id="priceChart" class="chart-div"></div>
                 <div id="priceLegend" class="chart-legend">
@@ -181,13 +181,9 @@
                     <div class="legend-item" style="color: #ef5350">OKX <span id="okxVal"></span></div>
                 </div>
             </div>
-            <div class="chart-container" style="flex: 1;">
+            <div class="chart-container" style="flex: 3;">
                  <h3 class="chart-title">Spread & EMA</h3>
                 <div id="spreadChart" class="chart-div"></div>
-            </div>
-             <div class="chart-container" style="flex: 1;">
-                 <h3 class="chart-title">Volume</h3>
-                <div id="volumeChart" class="chart-div"></div>
             </div>
         </div>
         
@@ -341,36 +337,13 @@
         });
         const emaSeries = spreadChart.addSeries(LightweightCharts.LineSeries, {
             color: '#ffffff',
-            lineWidth: 1,
-            lineStyle: LineStyle.Dashed,
+            lineWidth: 2,
+            lineStyle: LineStyle.Solid,
             title: 'EMA',
         });
         
         // Bands will be added dynamically. We store references here.
         let bandSeries = [];
-
-        // 3. Volume Chart
-        const volContainer = document.getElementById('volumeChart');
-        const volChart = createChart(volContainer, {
-            ...chartOptions,
-            rightPriceScale: {
-                 scaleMargins: {
-                    top: 0.1,
-                    bottom: 0,
-                },
-            }
-        });
-        
-        const mt5VolSeries = volChart.addSeries(LightweightCharts.HistogramSeries, {
-            color: '#26a69a',
-            priceFormat: { type: 'volume' },
-            title: 'MT5 Vol',
-        });
-         const okxVolSeries = volChart.addSeries(LightweightCharts.HistogramSeries, {
-            color: '#ef5350',
-            priceFormat: { type: 'volume' },
-             title: 'OKX Vol',
-        });
 
         // Resize observer to handle responsiveness
         new ResizeObserver(entries => {
@@ -385,15 +358,9 @@
             spreadChart.applyOptions({ width: newRect.width, height: newRect.height });
         }).observe(spreadContainer);
         
-        new ResizeObserver(entries => {
-            if (entries.length === 0 || entries[0].target !== volContainer) { return; }
-            const newRect = entries[0].contentRect;
-            volChart.applyOptions({ width: newRect.width, height: newRect.height });
-        }).observe(volContainer);
-        
         // Sync Reference: https://github.com/tradingview/lightweight-charts/issues/322
         // Simple sync:
-        const charts = [priceChart, spreadChart, volChart];
+        const charts = [priceChart, spreadChart];
         
         function syncCharts(sourceChart) {
             const range = sourceChart.timeScale().getVisibleLogicalRange();
@@ -484,10 +451,13 @@
         const paramsForm = document.getElementById('paramsForm');
         let currentParams = {};
         let backtestMarkers = []; // Store markers from loaded backtest
+        let markers = []; // Track markers globally
         
         // Shadow data for live marker calculation
         let globalSpreadData = [];
         let globalEmaData = [];
+        let globalOrderHistory = []; // Store order history
+        let latestHistoryMsg = null; // Store last history
 
         function handleMessage(msg) {
             if (msg.type === 'params') {
@@ -496,10 +466,14 @@
                 renderAccount(msg.payload);
             } else if (msg.type === 'bar') {
                updateCharts(msg.payload);
+               renderOrderMarkers(); // Re-render markers as new bar arrives
             } else if (msg.type === 'history') {
+                latestHistoryMsg = msg.payload;
                 loadHistory(msg.payload);
             } else if (msg.type === 'orders') {
+                globalOrderHistory = msg.payload;
                 updateOrderList(msg.payload);
+                renderOrderMarkers();
             }
         }
         
@@ -547,17 +521,13 @@
                  });
                  
                  // Trigger update to merge
-                 // We need spreadData/emaData to re-run updateMarkers...
-                 // But we don't have them easily accessible here without querying the series or storing them.
-                 // Easier approach: Just set them now, and let next 'updateCharts' merge them?
-                 // No, 'updateCharts' is called inside 'loadHistory' (historical).
-                 // Live updates call 'updateCharts' -> 'updateMarkers'? 
-                 // Wait, 'updateCharts' receives a single BAR. It doesn't call 'updateMarkers' (which loops over history).
-                 
-                 // Let's check updateCharts.
-                 
-                 markers.sort((a,b) => a.time - b.time);
-                 spreadSeries.setMarkers(markers);
+                 markers = [...backtestMarkers]; // Merge with backtest markers
+                 if(globalSpreadData.length > 0) {
+                     updateMarkers(globalSpreadData, globalEmaData);
+                 } else {
+                     markers.sort((a,b) => a.time - b.time);
+                     spreadSeries.setMarkers(markers);
+                 }
                  
              } catch (e) {
                  alert('Failed to load backtest results: ' + e);
@@ -571,12 +541,6 @@
         
         document.getElementById('btnLong').addEventListener('click', () => {
              const vol = document.getElementById('tradeVol').value;
-             // Send parameters update first to set volume preferrence on backend? 
-             // Ideally we send volume in the command. But for now based on backend logic:
-             // Backend reads tradeVolume from params. Let's update params or assume default
-             // A better way is to send 'make_long' with arguments.
-             
-             // Updating params first to ensure volume is correct
              ws.send(JSON.stringify({
                  type: 'params',
                  payload: { tradeVolume: parseFloat(vol) }
@@ -612,6 +576,17 @@
         
         // Add Close All Button Handler
         const closeAllBtn = document.createElement('button');
+        
+        // Add "Scroll to Latest" Button
+        const scrollToLatestBtn = document.createElement('button');
+        scrollToLatestBtn.innerText = 'Go to Latest';
+        scrollToLatestBtn.style.backgroundColor = '#1f6feb';
+        scrollToLatestBtn.style.marginTop = '10px';
+        scrollToLatestBtn.onclick = () => {
+             priceChart.timeScale().scrollToPosition(0, true);
+        };
+        document.querySelector('.controls-column').appendChild(scrollToLatestBtn);
+
         closeAllBtn.innerText = 'CLOSE ALL POSITIONS';
         closeAllBtn.style.backgroundColor = '#da3633'; // Red
         closeAllBtn.style.marginTop = '10px';
@@ -655,8 +630,6 @@
             });
         }
 
-        // Format of history payload: { ts: [time1, time2...], mt5: [candle1...], okx: [candle2...] }
-        // Each candle: { time, open, high, low, close, vol }
         function loadHistory(history) {
             console.log('Received history:', history);
             
@@ -686,94 +659,219 @@
             mt5Series.setData(mt5Data);
             okxSeries.setData(okxData);
             
-            const mt5VolData = history.mt5.map(c => ({
-                 time: c.time + OFFSET_SECONDS,
-                 value: c.volume,
-                 color: (c.close >= c.open) ? '#26a69a' : '#ef5350'
-            }));
-             const okxVolData = history.okx.map(c => ({
-                 time: c.time + OFFSET_SECONDS,
-                 value: c.volume,
-                 color: (c.close >= c.open) ? '#4caf50' : '#ef5350'
-            }));
+            // Use pre-calculated spread/EMA from backend if available
+            let spreadData = [];
+            let emaData = [];
             
-            mt5VolSeries.setData(mt5VolData);
-            okxVolSeries.setData(okxVolData);
-            
-            // Reconstruct spread and EMA history roughly
-            // We need joined data for this.
-            // Create a map of time -> okx candle
-            const okxMap = new Map();
-            okxData.forEach(c => okxMap.set(c.time, c));
-
-            const spreadData = [];
-            
-            // Iterate MT5 and find matching OKX
-            mt5Data.forEach(m => {
-                // Since we already shifted both, we can keys match directly
-                const o = okxMap.get(m.time);
-                if (o) {
-                    spreadData.push({
-                        time: m.time,
-                        value: m.close - o.close
-                    });
+            if (history.spread && history.ema) {
+                spreadData = history.spread.map(d => ({
+                    time: d.time + OFFSET_SECONDS,
+                    value: d.value
+                }));
+                emaData = history.ema.map(d => ({
+                    time: d.time + OFFSET_SECONDS,
+                    value: d.value
+                }));
+            } else {
+                // Fallback reconstruction
+                const okxMap = new Map();
+                okxData.forEach(c => okxMap.set(c.time, c));
+                mt5Data.forEach(m => {
+                    const o = okxMap.get(m.time);
+                    if (o) {
+                        spreadData.push({
+                            time: m.time,
+                            value: m.close - o.close
+                        });
+                    }
+                });
+                if (spreadData.length > 0) {
+                     const period = currentParams.emaPeriod || 60; 
+                     emaData = calculateEMA(spreadData, period);
                 }
+            }
+
+            // Bands
+            // Remove old band series first? No, we reuse them.
+            
+            // Calculate band values for current parameters
+            // But we don't have direct access to 'ema'. 
+            // We need to generate bands based on EMA series data.
+            // Oh wait, the backend sends 'bands' in the bar payload? Yes!
+            // { ... 'bands': [{'upper':..., 'lower':...}, ...] }
+            
+            // Wait, the 'bar' argument in updateCharts usually comes from 'live' message which has 'bands'.
+            // But 'loadHistory' does NOT have 'bands' inside each item.
+            // So we need to calculate bands locally for history OR backend needs to send them.
+            // Backend 'get_history_payload' does NOT calculate bands. 
+            // Let's calculate locally in JS using current params.
+            
+            const firstSpread = currentParams.firstSpread || 3.0;
+            const nextSpread = currentParams.nextSpread || 1.0;
+            const maxPos = currentParams.maxPos || 3;
+            
+            // Ensure we have enough band series
+            // We need pairs of Upper/Lower for each level (maxPos).
+            // Plus maybe a 'Signal' band?
+            // User requested: "画出firstSpread和nextSpread在Spread & EMA的体现" 
+            // (Draw firstSpread and nextSpread representation on Spread & EMA)
+            
+            const neededSeriesCount = maxPos * 2; 
+            while (bandSeries.length < neededSeriesCount) {
+                 const i = Math.floor(bandSeries.length / 2); // 0, 1, 2...
+                 const lvl = i + 1;
+                 const u = spreadChart.addSeries(LightweightCharts.LineSeries, {
+                     color: 'red',
+                     lineWidth: 1,
+                     lineStyle: LineStyle.Solid,
+                     title: `+L${lvl}`
+                 });
+                 const l = spreadChart.addSeries(LightweightCharts.LineSeries, {
+                     color: 'green',
+                     lineWidth: 1,
+                     lineStyle: LineStyle.Solid,
+                     title: `-L${lvl}`
+                 });
+                 bandSeries.push(u);
+                 bandSeries.push(l);
+            }
+
+            // Remove excess if any? (Not critical)
+            
+            // Calculate band data for ALL time points in emaData
+            // bandData[level_index] = { upper: [], lower: [] }
+            const bandDataArr = [];
+            for(let i=0; i<maxPos; i++) bandDataArr.push({ upper: [], lower: [] });
+            
+            emaData.forEach(pt => {
+                 for(let i=0; i<maxPos; i++) {
+                     const lvl = i + 1;
+                     const offset = firstSpread + (lvl - 1) * nextSpread;
+                     bandDataArr[i].upper.push({ time: pt.time, value: pt.value + offset });
+                     bandDataArr[i].lower.push({ time: pt.time, value: pt.value - offset });
+                 }
             });
             
+            // Set data to series
+            for(let i=0; i<maxPos; i++) {
+                if (bandSeries[i*2]) bandSeries[i*2].setData(bandDataArr[i].upper);
+                if (bandSeries[i*2+1]) bandSeries[i*2+1].setData(bandDataArr[i].lower);
+            }
+
             if (spreadData.length > 0) {
                 spreadSeries.setData(spreadData);
-                
-                // Calculate simplistic EMA locally for display
-                // Backend sends parameters, we can use the default or current one
-                const period = currentParams.emaPeriod || 60; 
-                const emaData = calculateEMA(spreadData, period);
                 emaSeries.setData(emaData);
 
-                // Add markers logic here based on spread/EMA crossing or external signals
-                updateMarkers(spreadData, emaData); 
+                // Initialize global shadow data for live updates
+                globalSpreadData = [...spreadData];
+                globalEmaData = [...emaData];
+
+                renderOrderMarkers(); 
             }
             
             // Adjust scale to fit
             priceChart.timeScale().fitContent();
         }
 
-        function updateMarkers(spreadData, emaData) {
-            // Visualize simplistic strategy signals on the chart
-            // For now, let's just mark where Spread crosses EMA
-            // Real application would receive explicit signals from backend
+        function renderOrderMarkers() {
+            // Visualize actual orders from history
+            // Logic: match order timestamp (ISO) to spread data time (seconds + offset)
             
-            let markers = [...backtestMarkers]; // Start with backtest markers
+            if (!globalSpreadData || globalSpreadData.length === 0) return;
+
+            let currentMarkers = [...backtestMarkers]; 
+            const OFFSET_SECONDS = 8 * 3600; // Same offset as data
+
+            // Helper to find closest spread entry
+            // Assuming spreadData is sorted by time
+            // For live orders, we might need to be precise.
             
-            // Basic simplistic crossover
-            for(let i=1; i<spreadData.length; i++) {
-                const prevS = spreadData[i-1].value;
-                const currS = spreadData[i].value;
-                const prevE = emaData[i-1].value;
-                const currE = emaData[i].value;
-                
-                // Bullish Cross (Spread goes above EMA)
-                if (prevS <= prevE && currS > currE) {
-                     markers.push({
-                        time: spreadData[i].time,
-                        position: 'belowBar',
-                        color: '#2196F3',
-                        shape: 'arrowUp',
-                        text: 'CrossUp'
-                    });
-                }
-                // Bearish Cross (Spread goes below EMA)
-                else if (prevS >= prevE && currS < currE) {
-                    markers.push({
-                        time: spreadData[i].time,
-                        position: 'aboveBar',
-                        color: '#E91E63',
-                        shape: 'arrowDown',
-                        text: 'CrossDown'
-                    });
-                }
-            }
-            // Sort by time
-            markers.sort((a,b) => a.time - b.time);
+            // Map orders to markers
+            (globalOrderHistory || []).forEach(o => {
+                 if(!o.ts) return;
+                 const orderDate = new Date(o.ts);
+                 const orderTs = orderDate.getTime() / 1000; // seconds
+                 const chartOrderTs = orderTs + OFFSET_SECONDS; // Align with chart timezone
+                 
+                 // Snap order time to nearest bar time or exact?
+                 // Lightweight charts markers attach to 'time'. If the time doesn't exist in the series,
+                 // it might not show or might float.
+                 // For line series, it's safer to snap to the nearest available bar time
+                 // IF the series is not continuous. But we have minute bars.
+                 
+                 // Find closest bar time
+                 let closestTime = null;
+                 let minDiff = Infinity;
+                 
+                 // Optimization: spreadData is sorted. 
+                 // Simple loop for now (history is usually < 2000 bars)
+                 for(let i=globalSpreadData.length-1; i>=0; i--) {
+                     const t = globalSpreadData[i].time;
+                     const diff = Math.abs(t - chartOrderTs);
+                     if(diff < minDiff) {
+                         minDiff = diff;
+                         closestTime = t;
+                     } 
+                     
+                     // Optimization: If we are scanning backwards and diff starts increasing significantly, we can stop?
+                     // But we must be careful.
+                     // If chartOrderTs > last t, diff decreases as we go deeper? No.
+                     // sorted times: [100, 200, 300]. chartOrderTs = 350.
+                     // i=2 (300): diff=50.
+                     // i=1 (200): diff=150. Growing.
+                     
+                     // If chartOrderTs = 150.
+                     // i=2 (300): diff=150.
+                     // i=1 (200): diff=50. Shrinking.
+                     // i=0 (100): diff=50. Same.
+                     
+                     // So we can't just break if diff > 3600 immediately. 
+                     // But we can check if we moved too far.
+                     if(Math.abs(t - chartOrderTs) > 86400) break; // Look back 24h max
+                 }
+                 
+                 // Relaxed constraint: Allow snapping to bar even if 4 hours apart 
+                 // (e.g. order placed on weekend or during gap)
+                 if(minDiff !== Infinity && minDiff < 4 * 3600) {
+                      let color = '#8b949e';
+                      let shape = 'circle';
+                      let text = '';
+                      
+                      const isFail = o.status.startsWith('failed');
+                      
+                      if (isFail) {
+                          color = '#da3633'; // Red
+                          shape = 'square';
+                          text = 'X ' + o.status.replace('failed_', '');
+                      } else {
+                          if (o.direction === 'long') {
+                              color = '#238636'; // Green
+                              shape = 'arrowUp';
+                              text = 'L';
+                          } else {
+                              color = '#E91E63'; // Red/Pink
+                              shape = 'arrowDown';
+                              text = 'S';
+                          }
+                      }
+                      
+                      currentMarkers.push({
+                          time: closestTime,
+                          position: o.direction === 'long' ? 'belowBar' : 'aboveBar',
+                          color: color,
+                          shape: shape,
+                          text: text + ` (v${o.vol})`
+                      });
+                 }
+            });
+
+            // Deduplicate markers by time + text? 
+            // Lightweight charts handles multiple markers on same time ok, they stack? 
+            // No, they overlap. We might need to adjust.
+            // But let's assume few orders per bar.
+            
+            currentMarkers.sort((a,b) => a.time - b.time);
+            markers = currentMarkers;
             spreadSeries.setMarkers(markers);
         }
 
@@ -829,6 +927,10 @@
             inputs.forEach(input => {
                 payload[input.dataset.key] = parseFloat(input.value);
             });
+            // Update tradeVolume specifically if it changed by separate input
+            const v = document.getElementById('tradeVol').value;
+            if(v) payload['tradeVolume'] = parseFloat(v);
+            
             if (ws && ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({ type: 'params', payload }));
             }
@@ -838,24 +940,6 @@
         // Lightweight charts expects seconds (UNIX) or 'yyyy-mm-dd' string. 
         // For intraday, we need UNIX timestamp (seconds).
         function toTime(isoStr) {
-             // The backend sends ISO string in UTC or with offset.
-             // Lightweight charts with "timezone: 'Asia/Shanghai'" expects a UTC timestamp (seconds),
-             // and IT will apply the shift (UTC+8) when rendering the label.
-             // However, if we feed it a timestamp that is ALREADY shifted, and tell it to shift again, it might be double shifting or confusing.
-             
-             // NEW REQUIREMENT: User says "Historical time should add 8 hours to display correctly".
-             // This likely means the historical data is coming as UTC timestamp, and the chart is NOT adding 8 hours automatically,
-             // OR the chart IS adding 8 hours but the source data was somehow treated as local.
-             
-             // Let's standardise:
-             // 1. We receive UTC timestamp (seconds) or ISO string (UTC).
-             // 2. We want to DISPLAY Beijing Time.
-             
-             // If chart option timezone: 'Asia/Shanghai' is set, it takes a UTC timestamp and displays it as UTC+8.
-             // If the user says it's still missing 8 hours, it implies we might need to manually shift it if the library isn't doing what we expect for history.
-             
-             // BUT, modifying 'toTime' affects live updates too. Let's look at loadHistory.
-             
              return Math.floor(new Date(isoStr).getTime() / 1000); 
         }
 
@@ -908,46 +992,73 @@
                 }
                 
                 // Re-calculate markers periodically or on new bar?
-                // For simplicity, re-run updateMarkers with the latest window
-                // But updateMarkers processes the WHOLE array. 
-                // Optimization: Just check the last few points?
-                // 'updateMarkers' sorts and replaces ALL markers. 
-                // So calling it here is fine but overhead.
-                updateMarkers(globalSpreadData, globalEmaData);
+                renderOrderMarkers(); // New logic
             }
             
             // Bands
             // Ensure band series exist
-            if (bandSeries.length < bar.bands.length * 2) {
-                 const currentPairs = bandSeries.length / 2;
-                 for (let i = currentPairs; i < bar.bands.length; i++) {
+            if (bar.bands) {
+                 // Check if series count matches (bar.bands length can change if params change)
+                 const needed = bar.bands.length * 2;
+                 while (bandSeries.length < needed) {
+                     const i = Math.floor(bandSeries.length / 2);
                      const lvl = i + 1;
                      const u = spreadChart.addSeries(LightweightCharts.LineSeries, {
-                         color: 'rgba(57, 211, 83, 0.4)',
+                         color: 'rgba(57, 211, 83, 0.3)',
                          lineWidth: 1,
-                         title: `Upper L${lvl}`
+                         lineStyle: LineStyle.Dashed,
+                         title: `+L${lvl}`
                      });
                      const l = spreadChart.addSeries(LightweightCharts.LineSeries, {
-                         color: 'rgba(57, 211, 83, 0.4)',
+                         color: 'rgba(57, 211, 83, 0.3)',
                          lineWidth: 1,
-                         title: `Lower L${lvl}`
+                         lineStyle: LineStyle.Dashed,
+                         title: `-L${lvl}`
                      });
                      bandSeries.push(u);
                      bandSeries.push(l);
                  }
+                
+                // Update bands
+                bar.bands.forEach((b, i) => {
+                    const uSeries = bandSeries[i * 2];
+                    const lSeries = bandSeries[i * 2 + 1];
+                    if (uSeries) uSeries.update({ time: time, value: b.upper });
+                    if (lSeries) lSeries.update({ time: time, value: b.lower });
+                });
+            } else {
+                 // Fallback calculation if backend didn't send bands (e.g. slight version mismatch or different payload)
+                 // Use currentParams
+                const firstSpread = currentParams.firstSpread || 3.0;
+                const nextSpread = currentParams.nextSpread || 1.0;
+                const maxPos = currentParams.maxPos || 3;
+                
+                // Ensure series
+                while (bandSeries.length < maxPos * 2) {
+                     const i = Math.floor(bandSeries.length / 2);
+                     const lvl = i + 1;
+                     const u = spreadChart.addSeries(LightweightCharts.LineSeries, {
+                         color: 'rgba(57, 211, 83, 0.3)',
+                         lineWidth: 1,
+                         lineStyle: LineStyle.Dashed
+                     });
+                     const l = spreadChart.addSeries(LightweightCharts.LineSeries, {
+                         color: 'rgba(57, 211, 83, 0.3)',
+                         lineWidth: 1,
+                         lineStyle: LineStyle.Dashed
+                     });
+                     bandSeries.push(u); bandSeries.push(l);
+                }
+                
+                for(let i=0; i<maxPos; i++) {
+                     const lvl = i + 1;
+                     const offset = firstSpread + (lvl - 1) * nextSpread;
+                     const uSeries = bandSeries[i * 2];
+                     const lSeries = bandSeries[i * 2 + 1];
+                     if (uSeries) uSeries.update({ time: time, value: bar.ema + offset });
+                     if (lSeries) lSeries.update({ time: time, value: bar.ema - offset });
+                }
             }
-            
-            // Update bands
-            bar.bands.forEach((b, i) => {
-                const uSeries = bandSeries[i * 2];
-                const lSeries = bandSeries[i * 2 + 1];
-                if (uSeries) uSeries.update({ time: time, value: b.upper });
-                if (lSeries) lSeries.update({ time: time, value: b.lower });
-            });
-
-            // 3. Volume
-            mt5VolSeries.update({ time: time, value: bar.mt5.vol });
-            okxVolSeries.update({ time: time, value: bar.okx.vol });
         }
 
         connect();

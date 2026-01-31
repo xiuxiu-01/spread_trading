@@ -9,7 +9,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 OKX_INST_MAP = {
-    'PAXG/USDT': 'PAXG-USDT'
+    'PAXG/USDT': 'PAXG-USDT',
+    "XAU/USDT:USDT": "XAU-USDT-SWAP",
 }
 
 class OKXWS:
@@ -107,6 +108,9 @@ class OKXWS:
                     # rotate endpoints on retries
                     self.url = self._endpoints[i % len(self._endpoints)]
                     print(f"[OKXWS] connecting {self.url}")
+                    
+                    conn_start = time.time()
+
                     self.ws = websocket.WebSocketApp(self.url,
                                                      on_open=self._on_open,
                                                      on_message=self._on_message,
@@ -121,11 +125,20 @@ class OKXWS:
                     if self._proxy_type:
                         kwargs['proxy_type'] = self._proxy_type
                     self.ws.run_forever(**kwargs)
-                    backoff = min(backoff * 2, 60.0)
+                    
+                    # If we stayed connected for >10s, reset backoff
+                    if time.time() - conn_start > 10.0:
+                        backoff = 1.0
+                    else:
+                        backoff = min(backoff * 2, 60.0)
+                        
                     i += 1
                 except Exception as e:
                     print('ws run err', e)
-                time.sleep(backoff)
+                    backoff = min(backoff * 2, 60.0)
+                
+                if not self._stop:
+                    time.sleep(backoff)
         t = threading.Thread(target=run, daemon=True)
         t.start()
         return t
