@@ -25,7 +25,7 @@ NEXT_SPREAD = float(os.getenv('NEXT_SPREAD', '1.0'))
 TAKE_PROFIT = float(os.getenv('TAKE_PROFIT', '0.5'))
 MAX_POS = int(os.getenv('MAX_POS', '3'))
 
-SYMBOL_OKX = os.getenv('OKX_SYMBOL', 'PAXG/USDT')
+SYMBOL_OKX = os.getenv('OKX_SYMBOL', 'XAU/USDT')
 SYMBOL_MT5 = os.getenv('MT5_SYMBOL', 'XAU')
 
 # Helpers

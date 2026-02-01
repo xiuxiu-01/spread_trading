@@ -8,19 +8,32 @@ load_dotenv()
 
 class OKXGateway:
     """Unified OKX gateway for market data and trading, with optional WS streaming."""
-    def __init__(self, symbol='PAXG/USDT'):
+    def __init__(self, symbol='XAU/USDT'):
         self.symbol = symbol
-        proxies = {
-            'http': os.getenv('HTTP_PROXY'),
-            'https': os.getenv('HTTPS_PROXY'),
-        }
+        # Build proxies dict, filtering out None values
+        http_proxy = os.getenv('HTTP_PROXY')
+        https_proxy = os.getenv('HTTPS_PROXY')
+        proxies = {}
+        if http_proxy:
+            proxies['http'] = http_proxy
+        if https_proxy:
+            proxies['https'] = https_proxy
+        
         opts: Dict[str, Any] = {
-            'apiKey': os.getenv('OKX_API_KEY'),
-            'secret': os.getenv('OKX_API_SECRET'),
-            'password': os.getenv('OKX_API_PASSPHRASE'),
             'enableRateLimit': True,
         }
-        if any(proxies.values()):
+        # Only add credentials if they are set (avoid None values)
+        api_key = os.getenv('OKX_API_KEY')
+        api_secret = os.getenv('OKX_API_SECRET')
+        api_passphrase = os.getenv('OKX_API_PASSPHRASE')
+        if api_key:
+            opts['apiKey'] = api_key
+        if api_secret:
+            opts['secret'] = api_secret
+        if api_passphrase:
+            opts['password'] = api_passphrase
+            
+        if proxies:
             opts['proxies'] = proxies
         self.client = ccxt.okx(opts)
         base = os.getenv('OKX_API_BASE')
@@ -166,32 +179,59 @@ class OKXGateway:
     def get_balance(self) -> float:
         """Return free USDT balance (or relevant quote currency)."""
         try:
-            # We assume quote currency is USDT for PAXG/USDT
-            # Robustly parse quote currency, handling '/' or '-' or failing gracefully
+            # We assume quote currency is USDT for XAU/USDT
             quote = 'USDT' # Default fallback
-            # if '/' in self.symbol:
-            #     quote = self.symbol.split('/')[1]
-            # elif '-' in self.symbol:
-            #     quote = self.symbol.split('-')[1]
 
             bal = self.client.fetch_balance()
-            if quote in bal:
-                return float(bal[quote]['free'])
+            if not bal:
+                return 0.0
+            
+            if quote in bal and isinstance(bal[quote], dict):
+                free_val = bal[quote].get('free')
+                if free_val is not None:
+                    return float(free_val)
+            
             # fallback if structure differs
-            return float(bal.get('free', {}).get(quote, 0.0))
+            free_dict = bal.get('free', {})
+            if free_dict and isinstance(free_dict, dict):
+                free_val = free_dict.get(quote, 0.0)
+                if free_val is not None:
+                    return float(free_val)
+            
+            return 0.0
         except Exception as e:
-            print(f"[OKXGateway] get_balance error: {e}")
+            try:
+                error_msg = repr(e) if e else "Unknown error"
+                print(f"[OKXGateway] get_balance error: {error_msg}")
+            except:
+                print("[OKXGateway] get_balance error: (unable to format error message)")
             return 0.0
 
     def get_asset_balance(self, currency: str) -> float:
         """Return free balance of a specific asset."""
         try:
             bal = self.client.fetch_balance()
-            if currency in bal:
-                 return float(bal[currency]['free'])
-            return float(bal.get('free', {}).get(currency, 0.0))
+            if not bal:
+                return 0.0
+            
+            if currency in bal and isinstance(bal[currency], dict):
+                free_val = bal[currency].get('free')
+                if free_val is not None:
+                    return float(free_val)
+            
+            free_dict = bal.get('free', {})
+            if free_dict and isinstance(free_dict, dict):
+                free_val = free_dict.get(currency, 0.0)
+                if free_val is not None:
+                    return float(free_val)
+            
+            return 0.0
         except Exception as e:
-            print(f"[OKXGateway] get_asset_balance({currency}) error: {e}")
+            try:
+                error_msg = repr(e) if e else "Unknown error"
+                print(f"[OKXGateway] get_asset_balance error: {error_msg}")
+            except:
+                print("[OKXGateway] get_asset_balance error: (unable to format error message)")
             return 0.0
 
     def get_positions(self) -> list:
@@ -234,7 +274,7 @@ class OKXGateway:
                 out.append({
                     'id': p.get('id'),
                     'side': p.get('side'), # long/short
-                    'amount': final_amount/100,
+                    'amount': final_amount,  # Amount in oz (not contracts)
                     'openPrice': float(p.get('entryPrice') or 0),
                     'unrealizedPnl': float(p.get('unrealizedPnl') or 0),
                     'leverage': p.get('leverage'),
@@ -243,7 +283,7 @@ class OKXGateway:
             # If no derivative positions, check if we have Spot assets (Base Currency)
             # This is a heuristic to show Spot holdings as "Long Positions"
             if not out and '/' in self.symbol:
-                # e.g. PAXG/USDT -> Base: PAXG
+                # e.g. XAU/USDT -> Base: XAU
                 parts = self.symbol.split('/')
                 if len(parts) >= 1:
                     base = parts[0]
@@ -253,7 +293,15 @@ class OKXGateway:
                     
                     # Check free balance (only free can be sold immediately)
                     # We use 'free' instead of 'total' to avoid "Insufficient balance" when trying to sell locked funds.
-                    amount = float(bal.get(base, {}).get('free', 0.0))
+                    if bal and isinstance(bal, dict):
+                        asset_bal = bal.get(base, {})
+                        if asset_bal and isinstance(asset_bal, dict):
+                            free_val = asset_bal.get('free', 0.0)
+                            amount = float(free_val) if free_val is not None else 0.0
+                        else:
+                            amount = 0.0
+                    else:
+                        amount = 0.0
                     
                     # Filter out dust (e.g. < 0.0001)
                     if amount > 0.0001:
@@ -268,7 +316,11 @@ class OKXGateway:
 
             return out
         except Exception as e:
-            print(f"[OKXGateway] get_positions error: {e}")
+            try:
+                error_msg = repr(e) if e else "Unknown error"
+                print(f"[OKXGateway] get_positions error: {error_msg}")
+            except:
+                print("[OKXGateway] get_positions error: (unable to format error message)")
             return []
 
     def place_market_order(self, side: str, amount: float):

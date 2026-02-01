@@ -12,7 +12,7 @@ Place a small post-only limit order on OKX to avoid immediate fill.
 Usage:
   python bot/place_order_okx.py [buy|sell] [amount] [symbol]
 Defaults:
-  side=buy, amount=0.001, symbol=PAXG/USDT
+  side=buy, amount=0.001, symbol=XAU/USDT
 Requires .env:
   OKX_API_KEY, OKX_API_SECRET, OKX_API_PASSPHRASE
 Optional:
@@ -24,7 +24,7 @@ load_dotenv()
 def main():
     side = sys.argv[1] if len(sys.argv) > 1 else 'buy'
     amount = float(sys.argv[2]) if len(sys.argv) > 2 else 0.001
-    symbol = sys.argv[3] if len(sys.argv) > 3 else 'PAXG/USDT'
+    symbol = sys.argv[3] if len(sys.argv) > 3 else 'XAU/USDT'
 
     # Ensure keys exist
     if not (os.getenv('OKX_API_KEY') and os.getenv('OKX_API_SECRET') and os.getenv('OKX_API_PASSPHRASE')):

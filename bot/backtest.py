@@ -40,7 +40,7 @@ class Backtester:
 
         print(f"Fetching {days} days of data from exchanges...")
         mt5_gw = MT5Gateway(os.getenv('MT5_SYMBOL', 'XAU'))
-        okx_gw = OKXGateway(os.getenv('OKX_SYMBOL', 'PAXG/USDT')) # Correct symbol
+        okx_gw = OKXGateway(os.getenv('OKX_SYMBOL', 'XAU/USDT')) # Correct symbol
         
         end_time = datetime.now(timezone.utc)
         start_time = end_time - timedelta(days=days)

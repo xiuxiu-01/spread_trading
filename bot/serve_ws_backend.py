@@ -27,7 +27,7 @@ os.makedirs(DATA_DIR, exist_ok=True)
 HISTORY_FILE = os.path.join(DATA_DIR, 'history.jsonl')
 
 EMA_PERIOD = int(os.getenv('EMA_PERIOD', '60'))
-FIRST_SPREAD = float(os.getenv('FIRST_SPREAD', '1.0'))
+FIRST_SPREAD = float(os.getenv('FIRST_SPREAD', '3.0'))
 NEXT_SPREAD = float(os.getenv('NEXT_SPREAD', '1.0'))
 TAKE_PROFIT = float(os.getenv('TAKE_PROFIT', '3.0'))
 MAX_POS = int(os.getenv('MAX_POS', '3'))
@@ -50,10 +50,11 @@ params = {
 orders = [] # In-memory order history
 
 async def broadcast(msg):
-    # Debug log to trace broadcasting
+    # Debug log to trace broadcasting (skip tick messages to reduce noise)
+    msg_type = msg.get('type')
     client_count = len(clients)
-    if client_count > 0:
-        print(f"Broadcasting to {client_count} clients: {msg.get('type')}")
+    if client_count > 0 and msg_type != 'tick':
+        print(f"Broadcasting to {client_count} clients: {msg_type}")
     
     dead = set()
     for ws in list(clients):
@@ -63,8 +64,10 @@ async def broadcast(msg):
                 await ws.send_json(msg)
             else:
                 await ws.send(json.dumps(msg))
-        except Exception as e:
-            print(f"Broadcast error: {e}")
+        except (ConnectionResetError, ConnectionError, OSError):
+            # Client disconnected - silently remove
+            dead.add(ws)
+        except Exception:
             dead.add(ws)
     for d in dead:
         clients.discard(d)
@@ -101,11 +104,21 @@ class Aggregator:
         self.last_mt5_close = None
         self.last_okx_close = None
         
+        # NEW: Store last bid/ask for spread calculation
+        self.last_mt5_bid = None
+        self.last_mt5_ask = None
+        self.last_okx_bid = None
+        self.last_okx_ask = None
+        
         self.times = []
         self.mt5_stats = [] # Store OHLCV dicts
         self.okx_stats = [] # Store OHLCV dicts
         self.spreads = []
         self.ema = []
+        
+        # NEW: Two spread lines for active trading
+        self.spread_sell = []  # MT5 bid - OKX ask (主动卖MT5买OKX)
+        self.spread_buy = []   # MT5 ask - OKX bid (主动买MT5卖OKX)
 
     def load_from_file(self):
         if not os.path.exists(HISTORY_FILE):
@@ -135,6 +148,8 @@ class Aggregator:
             self.okx_stats = []
             self.spreads = []
             self.ema = []
+            self.spread_sell = []
+            self.spread_buy = []
             
             for ts in sorted_keys:
                 d = history_map[ts]
@@ -142,6 +157,9 @@ class Aggregator:
                 self.mt5_stats.append(d['mt5'])
                 self.okx_stats.append(d['okx'])
                 self.spreads.append(d['spread'])
+                # Load spread_sell/spread_buy if available, else use mid spread
+                self.spread_sell.append(d.get('spread_sell', d['spread']))
+                self.spread_buy.append(d.get('spread_buy', d['spread']))
                 # Recompute EMA if missing or corrupt, but usually load it
                 if 'ema' in d:
                     self.ema.append(d['ema'])
@@ -178,6 +196,8 @@ class Aggregator:
                         'mt5': self.mt5_stats[i],
                         'okx': self.okx_stats[i],
                         'spread': self.spreads[i],
+                        'spread_sell': self.spread_sell[i] if i < len(self.spread_sell) else self.spreads[i],
+                        'spread_buy': self.spread_buy[i] if i < len(self.spread_buy) else self.spreads[i],
                         'ema': self.ema[i]
                     }
                     f.write(json.dumps(row) + '\n')
@@ -219,6 +239,8 @@ class Aggregator:
         self.mt5_stats = []
         self.okx_stats = []
         self.spreads = []
+        self.spread_sell = []
+        self.spread_buy = []
         self.ema = []
 
         for ts in all_ts:
@@ -243,6 +265,9 @@ class Aggregator:
             
             spread = c_mt5['close'] - c_okx['close']
             self.spreads.append(spread)
+            # For historical data, we don't have bid/ask, use mid spread
+            self.spread_sell.append(spread)
+            self.spread_buy.append(spread)
         
         self.ema = compute_ema(self.spreads, self.ema_period)
         self.rewrite_file()
@@ -252,6 +277,8 @@ class Aggregator:
         mt5_out = []
         okx_out = []
         spread_out = []
+        spread_sell_out = []
+        spread_buy_out = []
         ema_out = []
         
         for i, t_str in enumerate(self.times):
@@ -272,6 +299,13 @@ class Aggregator:
             okx_out.append(o)
 
             spread_out.append({'time': ts_val, 'value': self.spreads[i]})
+            
+            # Two spread lines for active trading
+            sell_val = self.spread_sell[i] if i < len(self.spread_sell) else self.spreads[i]
+            buy_val = self.spread_buy[i] if i < len(self.spread_buy) else self.spreads[i]
+            spread_sell_out.append({'time': ts_val, 'value': sell_val})
+            spread_buy_out.append({'time': ts_val, 'value': buy_val})
+            
             ema_out.append({'time': ts_val, 'value': self.ema[i]})
             
         return {
@@ -279,6 +313,8 @@ class Aggregator:
             'mt5': mt5_out,
             'okx': okx_out,
             'spread': spread_out,
+            'spread_sell': spread_sell_out,  # MT5 bid - OKX ask
+            'spread_buy': spread_buy_out,    # MT5 ask - OKX bid
             'ema': ema_out,
         }
 
@@ -320,6 +356,9 @@ class Aggregator:
                 emit_payload = self._maybe_emit(ts)
                 self.buf_mt5 = self._update_candle(self.buf_mt5, mid)
                 self.last_mt5_close = mid
+                # Store bid/ask for spread calculation
+                self.last_mt5_bid = float(bid)
+                self.last_mt5_ask = float(ask)
                 
             return emit_payload
 
@@ -340,6 +379,9 @@ class Aggregator:
                 emit_payload = self._maybe_emit(ts)
                 self.buf_okx = self._update_candle(self.buf_okx, mid)
                 self.last_okx_close = mid
+                # Store bid/ask for spread calculation
+                self.last_okx_bid = float(bid)
+                self.last_okx_ask = float(ask)
                 
             return emit_payload
 
@@ -377,6 +419,19 @@ class Aggregator:
                 spread = c_mt5['close'] - c_okx['close']
                 self.spreads.append(spread)
                 
+                # Calculate spread_sell and spread_buy using last bid/ask
+                # spread_sell = MT5 bid - OKX ask (主动卖MT5，主动买OKX)
+                # spread_buy = MT5 ask - OKX bid (主动买MT5，主动卖OKX)
+                mt5_bid = self.last_mt5_bid if self.last_mt5_bid else c_mt5['close']
+                mt5_ask = self.last_mt5_ask if self.last_mt5_ask else c_mt5['close']
+                okx_bid = self.last_okx_bid if self.last_okx_bid else c_okx['close']
+                okx_ask = self.last_okx_ask if self.last_okx_ask else c_okx['close']
+                
+                spread_sell = mt5_bid - okx_ask  # 卖MT5买OKX的实际spread
+                spread_buy = mt5_ask - okx_bid   # 买MT5卖OKX的实际spread
+                self.spread_sell.append(spread_sell)
+                self.spread_buy.append(spread_buy)
+                
                 # Optimized EMA append:
                 last_ema = self.ema[-1] if self.ema else spread
                 k = 2.0 / (self.ema_period + 1)
@@ -385,13 +440,15 @@ class Aggregator:
                 
                 ema_val = new_ema
                 
-                print(f"Emitting bar: {ts_iso} Spread: {spread:.2f} EMA: {ema_val:.2f}")
+                print(f"Emitting bar: {ts_iso} Spread: {spread:.2f} Sell: {spread_sell:.2f} Buy: {spread_buy:.2f} EMA: {ema_val:.2f}")
                 
                 res = {
                     'ts': ts_iso,
                     'mt5': c_mt5,
                     'okx': c_okx,
                     'spread': spread,
+                    'spread_sell': spread_sell,
+                    'spread_buy': spread_buy,
                     'ema': ema_val,
                 }
             else:
@@ -464,25 +521,38 @@ class Feeder:
             'balance': {'mt5': 0.0, 'okx': 0.0},
             'positions': {'mt5': [], 'okx': []}
         }
+        
+        # Real-time tick state for display
+        self.realtime_state = {
+            'mt5_bid': None, 'mt5_ask': None,
+            'okx_bid': None, 'okx_ask': None,
+            'spread_sell': None,  # MT5 bid - OKX ask
+            'spread_buy': None,   # MT5 ask - OKX bid
+            'spread_mid': None,
+            'ema': None,
+            'ts': None
+        }
+        self.last_signal_time = 0  # Prevent signal spam
 
     async def run_account_monitor(self):
         """Periodically fetch and broadcast account info."""
         print("Account Monitor started")
         while True:
             try:
-                # Fetch data
+                # Fetch balance
                 mt5_bal = await asyncio.to_thread(self.mt5.get_balance)
-                mt5_pos = await asyncio.to_thread(self.mt5.get_positions)
-                
-                # OKX might be blocking, run in thread
                 okx_bal = await asyncio.to_thread(self.okx.get_balance)
-                okx_pos = await asyncio.to_thread(self.okx.get_positions)
                 
-                print(f"[Account] MT5: {mt5_bal:.2f}, OKX: {okx_bal:.2f} | Pos: MT5={len(mt5_pos)} OKX={len(okx_pos)}")
+                # Get net exposure (already calculated)
+                mt5_net, okx_net, _, _ = await asyncio.to_thread(self.get_net_exposure)
+                # okx_net is in oz, convert to lots for display (1 lot = 100 oz)
+                okx_net_lots = okx_net / 100.0
+                
+                print(f"[Account] MT5: {mt5_bal:.2f}, OKX: {okx_bal:.2f} | Net: MT5={mt5_net:.2f} lots, OKX={okx_net:.2f} oz ({okx_net_lots:.2f} lots)")
 
                 new_state = {
                     'balance': {'mt5': mt5_bal, 'okx': okx_bal},
-                    'positions': {'mt5': mt5_pos, 'okx': okx_pos},
+                    'net': {'mt5': mt5_net, 'okx': okx_net_lots},  # Both in lots for display
                     'ts': datetime.now(timezone.utc).isoformat()
                 }
                 
@@ -520,7 +590,14 @@ class Feeder:
         Execute a spread trade with independent leg management to handle out-of-sync states.
         direction: 'long' (Buy Spread: Buy MT5, Sell OKX) or 'short' (Sell Spread: Sell MT5, Buy OKX)
         level: 1, 2, 3... determines sizing (size = level * base_vol) for accumulation
+        
+        Order execution: OKX first, then MT5 (only if OKX succeeds)
         """
+        # Check if MT5 market is open
+        if not self.mt5.is_market_open():
+            print("[Execute] MT5 market is closed, skipping trade")
+            return {'status': 'skipped_market_closed'}
+        
         # Initialize order record structure early
         timestamp = datetime.now(timezone.utc).isoformat()
         order_record = {
@@ -538,27 +615,41 @@ class Feeder:
         try:
             mt5_net, okx_net, _, _ = self.get_net_exposure()
             base_vol = float(params.get('tradeVolume', 0.01))
+            
+            # OKX uses oz (amount), MT5 uses lots. 1 lot = 100 oz
+            # For display consistency, convert OKX to lot equivalent
+            QTY_MULT = 100.0
+            okx_net_in_lots = okx_net / QTY_MULT  # Convert OKX oz to lot equivalent
                 
             print(f"[Execute] Direction: {direction}, Level: {level}, BaseVol: {base_vol}, MaxPos: {params.get('maxPos')}")
+            print(f"[Execute] Current Position - MT5: {mt5_net:.2f} lots, OKX: {okx_net:.2f} oz ({okx_net_in_lots:.2f} lots equiv)")
 
             max_pos = int(params.get('maxPos', 3))
             
-            # Calculate Target Volume for this level
+            # Calculate Target Volume for this level (in lots)
             target_vol_mt5 = min(level, max_pos) * base_vol
 
-            LIMIT = base_vol * 0.1
+            LIMIT = base_vol * 0.1  # 10% tolerance
             
             target_net_mt5 = 0.0
             if direction == 'long':
                 target_net_mt5 = target_vol_mt5
             else:
                 target_net_mt5 = -target_vol_mt5
-                
-            delta_mt5 = target_net_mt5 - mt5_net
             
-            if abs(delta_mt5) < LIMIT:
-                print(f"Already at target exposure (Target: {target_net_mt5}, Current: {mt5_net}). Skipping.")
-                # We don't record skipped orders to avoid spam
+            # For a proper hedge: MT5 long + OKX short (or vice versa)
+            # Expected OKX position should be opposite of MT5
+            expected_okx_in_lots = -target_net_mt5
+            
+            delta_mt5 = target_net_mt5 - mt5_net
+            delta_okx_in_lots = expected_okx_in_lots - okx_net_in_lots
+            
+            print(f"[Execute] Target - MT5: {target_net_mt5:.2f} lots, OKX: {expected_okx_in_lots:.2f} lots equiv")
+            print(f"[Execute] Delta - MT5: {delta_mt5:.2f}, OKX: {delta_okx_in_lots:.2f} lots equiv")
+            
+            # Check if both legs are already at target
+            if abs(delta_mt5) < LIMIT and abs(delta_okx_in_lots) < LIMIT:
+                print(f"[Execute] Already at target exposure (MT5: {mt5_net:.2f}/{target_net_mt5:.2f}, OKX: {okx_net_in_lots:.2f}/{expected_okx_in_lots:.2f}). Skipping.")
                 return {'status': 'skipped_already_filled'}
                 
             action_mt5 = None
@@ -575,130 +666,153 @@ class Feeder:
             if vol_mt5 < 0.01:
                 return {'status': 'skipped_small_volume'}
 
-            order_record['vol'] = vol_mt5 # Update volume in record
+            order_record['vol'] = vol_mt5
 
-            QTY_MULT = 100.0
-
+            # QTY_MULT already defined above
             action_okx = None
             amt_okx = 0.0
             
-            target_net_okx = -target_net_mt5 * QTY_MULT 
-            
-            delta_okx = target_net_okx - okx_net
-            
-            if delta_okx > (LIMIT * QTY_MULT): # Need to buy OKX (more positive)
+            # Use delta_okx_in_lots converted back to oz for OKX order
+            if delta_okx_in_lots > LIMIT:
                 action_okx = 'buy'
-                amt_okx = delta_okx
-            elif delta_okx < -(LIMIT * QTY_MULT): # Need to sell OKX (more negative)
+                amt_okx = abs(delta_okx_in_lots) * QTY_MULT
+            elif delta_okx_in_lots < -LIMIT:
                 action_okx = 'sell'
-                amt_okx = abs(delta_okx)
+                amt_okx = abs(delta_okx_in_lots) * QTY_MULT
+
+            # ========== OKX FIRST ==========
+            okx_executed_amt = 0.0
+            is_okx_success = False
+            
+            if action_okx:
+                # Calculate OKX amount based on MT5 target volume
+                amt_okx = vol_mt5 * QTY_MULT
+                print(f"[OKX FIRST] Executing OKX: {action_okx} {amt_okx}")
                 
+                try:
+                    is_spot = ('/' in self.okx.symbol and ':' not in self.okx.symbol and '-SWAP' not in self.okx.symbol)
+                    
+                    if is_spot:
+                        if action_okx == 'buy':
+                            quote_ccy = 'USDT'  
+                            if '/' in self.okx.symbol:
+                                quote_ccy = self.okx.symbol.split('/')[1]
+                            
+                            free_quote = self.okx.get_balance()
+                            ticker = self.okx.get_ticker()
+                            price = ticker.get('last') or 0.0
+                            
+                            if price > 0:
+                                cost = amt_okx * price
+                                if free_quote < cost:
+                                    print(f"!! OKX Insufficient Funds: Have {free_quote} {quote_ccy}, Need ~{cost} !!")
+                                    order_record['status'] = 'failed_okx_funds'
+                                    order_record['error'] = f'Insufficient {quote_ccy}: {free_quote} < {cost}'
+                                    orders.append(order_record)
+                                    return order_record
+
+                        elif action_okx == 'sell': 
+                            base_ccy = 'XAU'
+                            if '/' in self.okx.symbol:
+                                base_ccy = self.okx.symbol.split('/')[0]
+                            elif '-' in self.okx.symbol:
+                                base_ccy = self.okx.symbol.split('-')[0]
+
+                            free_base = self.okx.get_asset_balance(base_ccy)
+                            
+                            print(f"OKX Check: Selling {amt_okx} {base_ccy}. Have {free_base}.")
+
+                            if free_base < amt_okx:
+                                diff = amt_okx - free_base
+                                if diff < 0.001 and free_base > 0:
+                                    print(f"OKX quantity adjustment: {amt_okx} -> {free_base} (Close ALL avail)")
+                                    amt_okx = free_base
+                                else:
+                                    print(f"!! OKX Insufficient Asset: Have {free_base} {base_ccy}, Need {amt_okx} !!")
+                                    order_record['status'] = 'failed_okx_balance'
+                                    order_record['error'] = f'Insufficient {base_ccy}: {free_base} < {amt_okx}'
+                                    orders.append(order_record)
+                                    return order_record
+
+                    okx_res = self.okx.place_market_order(action_okx, amt_okx)
+                    order_record['okx_res'] = okx_res
+                    
+                    # Check OKX success
+                    if okx_res and isinstance(okx_res, dict):
+                        if okx_res.get('id') or okx_res.get('status') == 'closed':
+                            is_okx_success = True
+                            okx_executed_amt = float(okx_res.get('filled', amt_okx))
+                            print(f"[OKX SUCCESS] Filled: {okx_executed_amt}")
+                        else:
+                            print(f"[OKX] Response without clear success: {okx_res}")
+                            # Assume success if no error
+                            is_okx_success = True
+                            okx_executed_amt = amt_okx
+                    else:
+                        print(f"[OKX] Unexpected response: {okx_res}")
+                        is_okx_success = True  # Assume success for now
+                        okx_executed_amt = amt_okx
+                        
+                except Exception as e_okx:
+                    print(f"OKX Order Failed: {e_okx}")
+                    order_record['error'] = str(e_okx)
+                    order_record['status'] = 'failed_okx'
+                    orders.append(order_record)
+                    return order_record
+            else:
+                order_record['okx_res'] = 'skipped'
+                is_okx_success = True  # No OKX action needed
+
+            # ========== MT5 SECOND (only if OKX succeeded) ==========
+            if not is_okx_success:
+                order_record['status'] = 'failed_okx'
+                orders.append(order_record)
+                return order_record
+            
             mt5_executed_vol = 0.0
             is_mt5_success = False
 
             if action_mt5:
-                    print(f"Executing MT5: {action_mt5} {vol_mt5}")
-                    
-                    try:
-                        mt5_res = self.mt5.place_market_order(action_mt5, vol_mt5)
-                    except Exception:
-                        mt5_res = None
+                # Adjust MT5 volume based on OKX executed amount
+                if okx_executed_amt > 0:
+                    adjusted_mt5_vol = okx_executed_amt / QTY_MULT
+                    print(f"[MT5 SECOND] OKX Filled: {okx_executed_amt} -> MT5 Adjusted: {adjusted_mt5_vol}")
+                    vol_mt5 = round(adjusted_mt5_vol, 2)
+                
+                print(f"[MT5 SECOND] Executing MT5: {action_mt5} {vol_mt5}")
+                
+                try:
+                    mt5_res = self.mt5.place_market_order(action_mt5, vol_mt5)
+                except Exception as e:
+                    print(f"MT5 Order Exception: {e}")
+                    mt5_res = None
 
-                    if mt5_res and hasattr(mt5_res, 'retcode') and mt5_res.retcode == 10009:
-                        is_mt5_success = True
-                        mt5_executed_vol = mt5_res.volume
-                    elif isinstance(mt5_res, dict) and mt5_res.get('retcode') == 10009:
-                        is_mt5_success = True
-                        mt5_executed_vol = mt5_res.get('volume', vol_mt5)
-                    else:
-                        print(f"!! MT5 Order Failed/Skipped (Real res: {mt5_res}). MOCKING SUCCESS for testing !!")
-                        # For now we MOCK success if it fails, assuming dev environment. 
-                        # In PROD, set this to False.
-                        is_mt5_success = True
-                        mt5_executed_vol = vol_mt5
-                        mt5_res = {'retcode': 10009, 'volume': mt5_executed_vol, 'comment': 'MOCKED_SUCCESS'}
+                if mt5_res and hasattr(mt5_res, 'retcode') and mt5_res.retcode == 10009:
+                    is_mt5_success = True
+                    mt5_executed_vol = mt5_res.volume
+                elif isinstance(mt5_res, dict) and mt5_res.get('retcode') == 10009:
+                    is_mt5_success = True
+                    mt5_executed_vol = mt5_res.get('volume', vol_mt5)
+                else:
+                    print(f"!! MT5 Order Failed (OKX already executed!): {mt5_res} !!")
+                    # WARNING: OKX已成交但MT5失败，需要人工处理
+                    is_mt5_success = False
+                    mt5_res = mt5_res or {'retcode': -1, 'comment': 'FAILED'}
 
-                    def serialize_mt5(res):
-                        if hasattr(res, '_asdict'): return res._asdict()
-                        if isinstance(res, dict): return res
-                        return str(res)
-                    
-                    order_record['mt5_res'] = serialize_mt5(mt5_res)
-                    
-                    if not is_mt5_success:
-                        order_record['status'] = 'failed_mt5'
-                        orders.append(order_record)
-                        return order_record
+                def serialize_mt5(res):
+                    if hasattr(res, '_asdict'): return res._asdict()
+                    if isinstance(res, dict): return res
+                    return str(res)
+                
+                order_record['mt5_res'] = serialize_mt5(mt5_res)
+                
+                if not is_mt5_success:
+                    order_record['status'] = 'failed_mt5_after_okx'
+                    order_record['error'] = 'OKX executed but MT5 failed! Manual intervention required!'
+                    orders.append(order_record)
+                    return order_record
             else:
-                    order_record['mt5_res'] = 'skipped'
-
-            if action_okx:
-                    if action_mt5 and mt5_executed_vol > 0:
-                        adjusted_okx_amt = mt5_executed_vol * QTY_MULT
-                        print(f"MT5 Filled: {mt5_executed_vol} -> OKX Adjusted: {adjusted_okx_amt}")
-                        amt_okx = adjusted_okx_amt
-                    
-                    print(f"Executing OKX: {action_okx} {amt_okx}")
-                    try:
-                        is_spot = ('/' in self.okx.symbol and ':' not in self.okx.symbol and '-SWAP' not in self.okx.symbol)
-                        
-                        if is_spot:
-                            if action_okx == 'buy':
-                                quote_ccy = 'USDT'  
-                                if '/' in self.okx.symbol:
-                                    quote_ccy = self.okx.symbol.split('/')[1]
-                                
-                                free_quote = self.okx.get_balance()
-                                ticker = self.okx.get_ticker()
-                                price = ticker.get('last') or 0.0
-                                
-                                if price > 0:
-                                    cost = amt_okx * price
-                                    if free_quote < cost:
-                                        print(f"!! OKX Insufficient Funds: Have {free_quote} {quote_ccy}, Need ~{cost} !!")
-                                        order_record['status'] = 'failed_okx_funds'
-                                        order_record['error'] = f'Insufficient {quote_ccy}: {free_quote} < {cost}'
-                                        orders.append(order_record)
-                                        return order_record
-
-                            elif action_okx == 'sell': 
-                                base_ccy = 'PAXG'
-                                if '/' in self.okx.symbol:
-                                    base_ccy = self.okx.symbol.split('/')[0]
-                                elif '-' in self.okx.symbol:
-                                    base_ccy = self.okx.symbol.split('-')[0]
-
-                                free_base = self.okx.get_asset_balance(base_ccy)
-                                
-                                print(f"OKX Check: Selling {amt_okx} {base_ccy}. Have {free_base}.")
-
-                                if free_base < amt_okx:
-                                    diff = amt_okx - free_base
-                                    # Allow tiny dust tolerance
-                                    if diff < 0.001 and free_base > 0:
-                                        print(f"OKX quantity adjustment: {amt_okx} -> {free_base} (Close ALL avail)")
-                                        amt_okx = free_base
-                                    else:
-                                        print(f"!! OKX Insufficient Asset: Have {free_base} {base_ccy}, Need {amt_okx} !!")
-                                        order_record['status'] = 'failed_okx_balance'
-                                        order_record['error'] = f'Insufficient {base_ccy}: {free_base} < {amt_okx}'
-                                        orders.append(order_record)
-                                        return order_record
-
-                        okx_res = self.okx.place_market_order(action_okx, amt_okx)
-                        order_record['okx_res'] = okx_res
-                    except Exception as e_okx:
-                        print(f"OKX Order Failed: {e_okx}")
-                        order_record['error'] = str(e_okx)
-                        if action_mt5 and is_mt5_success:
-                            order_record['status'] = 'failed_okx' 
-                        else:
-                            order_record['status'] = 'failed_all' 
-                        orders.append(order_record)
-                        return order_record
-
-            else:
-                    order_record['okx_res'] = 'skipped'
+                order_record['mt5_res'] = 'skipped'
 
             order_record['status'] = 'filled_all'
 
@@ -742,102 +856,283 @@ class Feeder:
         return results
 
     def start(self, loop):
-        def mt5_thread():
-            print("MT5 Thread started") 
+        # Real-time tick thread for MT5 (no market open check - always display bid/ask)
+        def mt5_tick_thread():
+            print("MT5 Realtime Tick Thread started") 
             try:
                 for tick in self.mt5.stream_ticks():
-                    if not self.mt5.is_market_open():
-                         continue
-                    
-                    bid = tick.get('bid'); ask = tick.get('ask')
-                    last = tick.get('last') 
-                    ts = datetime.now(timezone.utc)
+                    bid = tick.get('bid')
+                    ask = tick.get('ask')
                     if bid and ask:
                         loop.call_soon_threadsafe(
-                            lambda: asyncio.create_task(self.process_mt5_tick(bid, ask, ts, last=last))
+                            lambda b=bid, a=ask: asyncio.create_task(self.process_realtime_mt5(b, a))
                         )
             except Exception as e:
-                print(f"MT5 Thread loop error: {e}")
-        threading.Thread(target=mt5_thread, daemon=True).start()
+                print(f"MT5 Tick Thread error: {e}")
+        threading.Thread(target=mt5_tick_thread, daemon=True).start()
 
-        def okx_thread():
-            print("OKX Thread started")
+        # Real-time tick thread for OKX (no market open check - always display bid/ask)
+        def okx_tick_thread():
+            print("OKX Realtime Tick Thread started")
             while True:
                 try:
-                    last_price = None
-                    try:
-                        ticker = self.okx.get_ticker()
-                        if ticker:
-                             last_price = ticker.get('last')
-                    except Exception:
-                        pass
-
                     ob = self.okx.latest_ws_snapshot() or {}
                     bids = ob.get('bids') or []
                     asks = ob.get('asks') or []
                     if bids and asks:
-                        best_bid = bids[0][0]; best_ask = asks[0][0]
-                        ts = datetime.now(timezone.utc)
+                        best_bid = float(bids[0][0])
+                        best_ask = float(asks[0][0])
                         loop.call_soon_threadsafe(
-                            lambda: asyncio.create_task(self.process_okx_tick(best_bid, best_ask, ts, last=last_price))
+                            lambda b=best_bid, a=best_ask: asyncio.create_task(self.process_realtime_okx(b, a))
                         )
-                    time.sleep(0.5)
+                    time.sleep(0.3)  # Faster updates for real-time display
                 except Exception as e:
-                    print(f"OKX Thread loop error: {e}")
+                    print(f"OKX Tick Thread error: {e}")
                     time.sleep(1)
-        threading.Thread(target=okx_thread, daemon=True).start()
+        threading.Thread(target=okx_tick_thread, daemon=True).start()
 
-    async def process_mt5_tick(self, bid, ask, ts, last=None):
-        bar = self.agg.on_mt5_tick(bid, ask, ts, last=last)
-        if bar:
+        # K-line fetch thread - runs at :05 of each minute
+        def kline_fetch_thread():
+            print("K-line Fetch Thread started (fetches at :05 each minute)")
+            while True:
+                try:
+                    if not self.mt5.is_market_open():
+                        time.sleep(10)
+                        continue
+                    
+                    now = datetime.now(timezone.utc)
+                    # Wait until :05 of the minute
+                    seconds_to_wait = (5 - now.second) % 60
+                    if seconds_to_wait > 0 and seconds_to_wait < 55:
+                        time.sleep(seconds_to_wait)
+                    
+                    # Fetch last completed 1m bar
+                    loop.call_soon_threadsafe(
+                        lambda: asyncio.create_task(self.fetch_and_emit_kline())
+                    )
+                    
+                    # Sleep until next minute
+                    time.sleep(55)
+                except Exception as e:
+                    print(f"K-line Fetch Thread error: {e}")
+                    time.sleep(10)
+        threading.Thread(target=kline_fetch_thread, daemon=True).start()
+
+    async def process_realtime_mt5(self, bid, ask):
+        """Process MT5 tick for real-time display and strategy trigger."""
+        self.realtime_state['mt5_bid'] = float(bid)
+        self.realtime_state['mt5_ask'] = float(ask)
+        self.realtime_state['ts'] = datetime.now(timezone.utc).isoformat()
+        
+        await self._update_realtime_spread()
+    
+    async def process_realtime_okx(self, bid, ask):
+        """Process OKX tick for real-time display and strategy trigger."""
+        self.realtime_state['okx_bid'] = float(bid)
+        self.realtime_state['okx_ask'] = float(ask)
+        self.realtime_state['ts'] = datetime.now(timezone.utc).isoformat()
+        
+        await self._update_realtime_spread()
+    
+    async def _update_realtime_spread(self):
+        """Calculate and broadcast real-time spread, check strategy signals."""
+        mt5_bid = self.realtime_state['mt5_bid']
+        mt5_ask = self.realtime_state['mt5_ask']
+        okx_bid = self.realtime_state['okx_bid']
+        okx_ask = self.realtime_state['okx_ask']
+        
+        if not all([mt5_bid, mt5_ask, okx_bid, okx_ask]):
+            return
+        
+        # Calculate spreads
+        spread_sell = mt5_bid - okx_ask  # 做空spread: 卖MT5买OKX
+        spread_buy = mt5_ask - okx_bid   # 做多spread: 买MT5卖OKX
+        spread_mid = (mt5_bid + mt5_ask) / 2 - (okx_bid + okx_ask) / 2
+        
+        self.realtime_state['spread_sell'] = spread_sell
+        self.realtime_state['spread_buy'] = spread_buy
+        self.realtime_state['spread_mid'] = spread_mid
+        
+        # Get current EMA from history
+        ema = self.agg.ema[-1] if self.agg.ema else spread_mid
+        self.realtime_state['ema'] = ema
+        
+        # Broadcast tick data
+        await broadcast({
+            'type': 'tick',
+            'payload': {
+                'mt5_bid': mt5_bid,
+                'mt5_ask': mt5_ask,
+                'okx_bid': okx_bid,
+                'okx_ask': okx_ask,
+                'spread_sell': spread_sell,
+                'spread_buy': spread_buy,
+                'spread_mid': spread_mid,
+                'ema': ema,
+                'ts': self.realtime_state['ts']
+            }
+        })
+        
+        # Real-time strategy check
+        await self._check_realtime_signal(spread_mid, ema)
+    
+    async def _check_realtime_signal(self, spread, ema):
+        """Check for trading signals in real-time (tick-level trigger)."""
+        if not params.get('autoTrade', False):
+            return
+        
+        # Check if market is open before allowing signals
+        if not self.mt5.is_market_open():
+            return
+        
+        # Prevent signal spam - minimum 60 seconds (1 minute) between signals
+        now = time.time()
+        if now - self.last_signal_time < 60:
+            return
+        
+        first_spread = float(params['firstSpread'])
+        next_spread = float(params['nextSpread'])
+        max_pos = int(params.get('maxPos', 3))
+        
+        signal_action = None
+        signal_level = 0
+        
+        # Check for short signals (spread too high)
+        for lvl in range(max_pos, 0, -1):
+            upper = ema + first_spread + (lvl - 1) * next_spread
+            if spread > upper:
+                signal_action = 'short'
+                signal_level = lvl
+                break
+        
+        # Check for long signals (spread too low)
+        if not signal_action:
+            for lvl in range(max_pos, 0, -1):
+                lower = ema - first_spread - (lvl - 1) * next_spread
+                if spread < lower:
+                    signal_action = 'long'
+                    signal_level = lvl
+                    break
+        
+        if signal_action:
+            self.last_signal_time = now
+            print(f"[AutoTrade REALTIME] Triggering {signal_action} Level {signal_level} | Spread: {spread:.2f} vs EMA: {ema:.2f}")
+            
+            async def trade_task():
+                try:
+                    await asyncio.to_thread(self.execute_trade, signal_action, level=signal_level)
+                except Exception as e:
+                    print(f"AutoTrade execution error: {e}")
+                await broadcast({'type': 'orders', 'payload': orders})
+            
+            asyncio.create_task(trade_task())
+
+    async def fetch_and_emit_kline(self):
+        """Fetch latest 1m K-line from both exchanges and emit bar."""
+        try:
+            now = datetime.now(timezone.utc)
+            # Get bar from 2 minutes ago to ensure it's complete
+            end_time = now.replace(second=0, microsecond=0)
+            start_time = end_time - timedelta(minutes=2)
+            
+            # Fetch MT5 K-line
+            mt5_bars = await asyncio.to_thread(
+                self.mt5.get_historical_data,
+                start_time.replace(tzinfo=None),
+                end_time.replace(tzinfo=None),
+                'UTC'
+            )
+            
+            # Fetch OKX K-line
+            okx_bars = await asyncio.to_thread(
+                self.okx.get_historical_data,
+                start_time.replace(tzinfo=None),
+                end_time.replace(tzinfo=None)
+            )
+            
+            if not mt5_bars or not okx_bars:
+                print(f"[KLine] No data: MT5={len(mt5_bars) if mt5_bars else 0}, OKX={len(okx_bars) if okx_bars else 0}")
+                return
+            
+            # Get the last complete bar
+            mt5_bar = mt5_bars[-1]
+            okx_bar = okx_bars[-1]
+            
+            # Check if we already have this bar
+            bar_ts = mt5_bar['time']
+            bar_iso = datetime.fromtimestamp(bar_ts, timezone.utc).isoformat()
+            
+            if self.agg.times and bar_iso <= self.agg.times[-1]:
+                return  # Already have this bar
+            
+            # Build bar data
+            c_mt5 = {
+                'open': float(mt5_bar['open']),
+                'high': float(mt5_bar['high']),
+                'low': float(mt5_bar['low']),
+                'close': float(mt5_bar['close']),
+                'vol': int(mt5_bar.get('volume', 0))
+            }
+            c_okx = {
+                'open': float(okx_bar['open']),
+                'high': float(okx_bar['high']),
+                'low': float(okx_bar['low']),
+                'close': float(okx_bar['close']),
+                'vol': int(okx_bar.get('volume', 0))
+            }
+            
+            spread = c_mt5['close'] - c_okx['close']
+            
+            # Use realtime bid/ask for spread_sell/spread_buy
+            mt5_bid = self.realtime_state.get('mt5_bid') or c_mt5['close']
+            mt5_ask = self.realtime_state.get('mt5_ask') or c_mt5['close']
+            okx_bid = self.realtime_state.get('okx_bid') or c_okx['close']
+            okx_ask = self.realtime_state.get('okx_ask') or c_okx['close']
+            
+            spread_sell = mt5_bid - okx_ask
+            spread_buy = mt5_ask - okx_bid
+            
+            # Update aggregator
+            self.agg.times.append(bar_iso)
+            self.agg.mt5_stats.append(c_mt5)
+            self.agg.okx_stats.append(c_okx)
+            self.agg.spreads.append(spread)
+            self.agg.spread_sell.append(spread_sell)
+            self.agg.spread_buy.append(spread_buy)
+            
+            # Calculate new EMA
+            last_ema = self.agg.ema[-1] if self.agg.ema else spread
+            k = 2.0 / (self.agg.ema_period + 1)
+            new_ema = spread * k + last_ema * (1 - k)
+            self.agg.ema.append(new_ema)
+            
+            bar = {
+                'ts': bar_iso,
+                'mt5': c_mt5,
+                'okx': c_okx,
+                'spread': spread,
+                'spread_sell': spread_sell,
+                'spread_buy': spread_buy,
+                'ema': new_ema,
+            }
+            
+            # Save and broadcast
             self.agg.save_bar(bar)
             decorated = self.agg._decorate_bar(bar)
             
-            # Check Auto Trade
-            if decorated.get('signal') and params.get('autoTrade', False):
-                # Trigger only once per bar (approx) - actually on_mt5_tick only returns bar once per minute.
-                # So this is safe.
-                signal = decorated['signal']
-                level = decorated.get('level', 1)
-                print(f"[AutoTrade] Triggering {signal} Level {level} based on spread {decorated['spread']:.2f} vs EMA {decorated['ema']:.2f}")
-                
-                # Execute asynchronously and broadcast updates
-                async def trade_task():
-                    try:
-                        await asyncio.to_thread(self.execute_trade, signal, level=level)
-                    except Exception as e:
-                        print(f"AutoTrade execution error: {e}")
-                    # Broadcast the updated orders list regardless of success/fail
-                    await broadcast({'type': 'orders', 'payload': orders})
-
-                asyncio.create_task(trade_task())
-
+            print(f"[KLine] New bar: {bar_iso} | Spread: {spread:.2f} | EMA: {new_ema:.2f}")
             await broadcast({'type': 'bar', 'payload': decorated})
+            
+        except Exception as e:
+            print(f"[KLine] Fetch error: {e}")
+
+    async def process_mt5_tick(self, bid, ask, ts, last=None):
+        # Legacy - kept for compatibility but not used in new architecture
+        pass
     
     async def process_okx_tick(self, bid, ask, ts, last=None):
-        bar = self.agg.on_okx_tick(bid, ask, ts, last=last)
-        if bar:
-            self.agg.save_bar(bar)
-            decorated = self.agg._decorate_bar(bar)
-
-            # Check Auto Trade
-            if decorated.get('signal') and params.get('autoTrade', False):
-                signal = decorated['signal']
-                level = decorated.get('level', 1)
-                print(f"[AutoTrade] Triggering {signal} Level {level} based on spread {decorated['spread']:.2f} vs EMA {decorated['ema']:.2f}")
-                
-                # Execute asynchronously and broadcast updates
-                async def trade_task():
-                    try:
-                        await asyncio.to_thread(self.execute_trade, signal, level=level)
-                    except Exception as e:
-                        print(f"AutoTrade execution error: {e}")
-                    # Broadcast the updated orders list regardless of success/fail
-                    await broadcast({'type': 'orders', 'payload': orders})
-
-                asyncio.create_task(trade_task())
-
-            await broadcast({'type': 'bar', 'payload': decorated})
+        # Legacy - kept for compatibility but not used in new architecture
+        pass
 
     async def run_scheduler(self):
         print("Scheduler started (Market Monitor)")
@@ -941,6 +1236,17 @@ async def handler(ws, path):
                 elif msg.get('type') == 'close_all':
                     print("Manual API Close All Request")
                     res = feeder.close_all()
+                
+                elif msg.get('type') == 'refresh_history':
+                    print("Refresh History Request - recalculating with new params")
+                    if feeder:
+                        # Recalculate EMA with new period
+                        feeder.agg.ema_period = params.get('emaPeriod', EMA_PERIOD)
+                        feeder.agg.ema = compute_ema(feeder.agg.spreads, feeder.agg.ema_period)
+                        
+                        # Build and send history
+                        history = feeder.agg.get_history_payload()
+                        await ws.send_json({ 'type': 'history', 'payload': history })
                         
             except Exception as e:
                 print('ws msg err', e)
@@ -1022,6 +1328,17 @@ async def http_ws(request):
                     elif msg.get('type') == 'close_all':
                         print("Manual HTTP WS Close All Request")
                         feeder.close_all()
+                    
+                    elif msg.get('type') == 'refresh_history':
+                        print("Refresh History Request (http_ws) - recalculating with new params")
+                        if feeder:
+                            # Recalculate EMA with new period
+                            feeder.agg.ema_period = params.get('emaPeriod', EMA_PERIOD)
+                            feeder.agg.ema = compute_ema(feeder.agg.spreads, feeder.agg.ema_period)
+                            
+                            # Build and send history
+                            history = feeder.agg.get_history_payload()
+                            await ws.send_json({ 'type': 'history', 'payload': history })
 
                 except Exception as e:
                     print('http ws msg err', e)

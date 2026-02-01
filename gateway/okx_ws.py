@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 OKX_INST_MAP = {
-    'PAXG/USDT': 'PAXG-USDT',
+    'XAU/USDT': 'XAU-USDT',
     "XAU/USDT:USDT": "XAU-USDT-SWAP",
 }
 

@@ -33,8 +33,8 @@ def list_contracts():
         
         print(f"Total derivative markets found: {len(swaps)}")
         
-        # Look for Gold related (XAU, PAXG, XAUT)
-        gold_related = [s for s in swaps if 'XAU' in s or 'PAXG' in s or 'GOLD' in s]
+        # Look for Gold related (XAU, XAU, XAUT)
+        gold_related = [s for s in swaps if 'XAU' in s or 'XAU' in s or 'GOLD' in s]
         
         print("\n--- Gold/Metal Related Contracts ---")
         for s in sorted(gold_related):

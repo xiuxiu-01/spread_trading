@@ -7,7 +7,7 @@ from mt5_client import init_mt5, get_tick, shutdown_mt5
 def test_okx():
     try:
         okx = create_okx()  # public market data only
-        ob = get_orderbook(okx, 'PAXG/USDT', limit=5)
+        ob = get_orderbook(okx, 'XAU/USDT', limit=5)
         best_bid = ob['bids'][0][0] if ob['bids'] else None
         best_ask = ob['asks'][0][0] if ob['asks'] else None
         print('[OKX] best bid/ask:', best_bid, best_ask)

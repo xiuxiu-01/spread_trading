@@ -1,0 +1,1240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Arbitrage Monitor</title>
+    <!-- Load Lightweight Charts from local server -->
+    <script src="lightweight-charts.js"></script>
+    <style>
+        :root {
+            --bg-color: #0d1117;
+            --card-bg: #161b22;
+            --text-primary: #c9d1d9;
+            --text-secondary: #8b949e;
+            --accent: #58a6ff;
+            --border: #30363d;
+            --green: #238636;
+            --red: #da3633;
+        }
+        
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            box-sizing: border-box;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        h1 { margin: 0; font-size: 1.5rem; }
+
+        .status {
+            font-size: 0.9rem;
+            color: var(--text-secondary);
+        }
+        .status.connected { color: var(--green); }
+        .status.disconnected { color: var(--red); }
+
+        .container {
+            display: flex;
+            flex: 1;
+            gap: 20px;
+            overflow: hidden;
+        }
+
+        .charts-column {
+            flex: 3;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            min-width: 0; /* needed for chart resize */
+        }
+
+        .chart-container {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 10px;
+            flex: 1;
+            position: relative;
+            min-height: 0;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .chart-title {
+            margin: 0 0 5px 0;
+            font-size: 0.9rem;
+            color: var(--text-secondary);
+        }
+
+        .chart-div {
+            flex: 1;
+            width: 100%;
+        }
+
+        .controls-column {
+            flex: 1;
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 20px;
+            overflow-y: auto;
+            max-width: 300px;
+        }
+
+        .control-group { margin-bottom: 15px; }
+        .control-group label {
+            display: block;
+            margin-bottom: 5px;
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+        }
+        .control-group input {
+            width: 100%;
+            background: var(--bg-color);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            padding: 5px 10px;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        .control-group input:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+
+        button {
+            background-color: #238636;
+            color: white;
+            border: 1px solid rgba(240,246,252,0.1);
+            padding: 5px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            width: 100%;
+            font-weight: 600;
+        }
+        button:hover { background-color: #2ea043; }
+        
+        /* Legend for Price Chart */
+        .chart-legend {
+            position: absolute;
+            top: 40px;
+            left: 20px;
+            z-index: 10;
+            font-size: 12px;
+            font-family: monospace;
+            pointer-events: none;
+        }
+        .legend-item { margin-bottom: 2px; }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Arbitrage Monitor</h1>
+        <div id="connectionStatus" class="status disconnected">Disconnected</div>
+    </header>
+
+    <div class="header">
+        <h1>MT5 <-> OKX Arbitrage Bot</h1>
+        <div id="status">Connecting...</div>
+    </div>
+    
+    <div class="panel">
+        <h3>Account Info</h3>
+        <div style="display: flex; gap: 20px;">
+            <div style="flex: 1; padding: 10px; background: #262626; border-radius: 4px;">
+                <strong>MT5 (XAU)</strong><br/>
+                Equity: <span id="mt5-equity">--</span><br/>
+                Positions: <span id="mt5-pos-count">0</span><br/>
+                Net Vol: <span id="mt5-net">0.00</span>
+            </div>
+            <div style="flex: 1; padding: 10px; background: #262626; border-radius: 4px;">
+                <strong>OKX (XAU)</strong><br/>
+                USDT Free: <span id="okx-balance">--</span><br/>
+                Positions: <span id="okx-pos-count">0</span><br/>
+                Net Amt: <span id="okx-net">0.00000000</span>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Real-time Quotes Panel -->
+    <div class="panel" style="margin-top: 10px;">
+        <h3>实时行情 (Real-time Quotes)</h3>
+        <div style="display: flex; gap: 20px; flex-wrap: wrap;">
+            <div style="flex: 1; min-width: 180px; padding: 10px; background: #1a1a2e; border-radius: 4px; border: 1px solid #30363d;">
+                <strong style="color: #4caf50;">MT5</strong>
+                <div style="display: flex; justify-content: space-between; margin-top: 8px;">
+                    <div>
+                        <span style="color: #8b949e; font-size: 0.8em;">Bid</span><br/>
+                        <span id="rt-mt5-bid" style="font-size: 1.2em; font-weight: bold; color: #ef5350;">--</span>
+                    </div>
+                    <div style="text-align: right;">
+                        <span style="color: #8b949e; font-size: 0.8em;">Ask</span><br/>
+                        <span id="rt-mt5-ask" style="font-size: 1.2em; font-weight: bold; color: #4caf50;">--</span>
+                    </div>
+                </div>
+            </div>
+            <div style="flex: 1; min-width: 180px; padding: 10px; background: #1a1a2e; border-radius: 4px; border: 1px solid #30363d;">
+                <strong style="color: #ff9800;">OKX</strong>
+                <div style="display: flex; justify-content: space-between; margin-top: 8px;">
+                    <div>
+                        <span style="color: #8b949e; font-size: 0.8em;">Bid</span><br/>
+                        <span id="rt-okx-bid" style="font-size: 1.2em; font-weight: bold; color: #ef5350;">--</span>
+                    </div>
+                    <div style="text-align: right;">
+                        <span style="color: #8b949e; font-size: 0.8em;">Ask</span><br/>
+                        <span id="rt-okx-ask" style="font-size: 1.2em; font-weight: bold; color: #4caf50;">--</span>
+                    </div>
+                </div>
+            </div>
+            <div style="flex: 1; min-width: 200px; padding: 10px; background: #1a1a2e; border-radius: 4px; border: 1px solid #30363d;">
+                <strong style="color: #58a6ff;">Spread (实时)</strong>
+                <div style="display: flex; justify-content: space-between; margin-top: 8px;">
+                    <div>
+                        <span style="color: #ef5350; font-size: 0.8em;">做空 Sell</span><br/>
+                        <span id="rt-spread-sell" style="font-size: 1.2em; font-weight: bold;">--</span>
+                    </div>
+                    <div style="text-align: center;">
+                        <span style="color: #8b949e; font-size: 0.8em;">EMA</span><br/>
+                        <span id="rt-ema" style="font-size: 1.2em; font-weight: bold; color: #ffffff;">--</span>
+                    </div>
+                    <div style="text-align: right;">
+                        <span style="color: #4caf50; font-size: 0.8em;">做多 Buy</span><br/>
+                        <span id="rt-spread-buy" style="font-size: 1.2em; font-weight: bold;">--</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="container">
+        <div class="charts-column">
+            <div class="chart-container" style="flex: 2;">
+                <h3 class="chart-title">Price Candles (MT5 vs OKX)</h3>
+                <div id="priceChart" class="chart-div"></div>
+                <div id="priceLegend" class="chart-legend">
+                    <div class="legend-item" style="color: #4caf50">MT5 <span id="mt5Val"></span></div>
+                    <div class="legend-item" style="color: #ef5350">OKX <span id="okxVal"></span></div>
+                </div>
+            </div>
+            <div class="chart-container" style="flex: 2;">
+                 <h3 class="chart-title">做空Spread (卖MT5买OKX): MT5 Bid - OKX Ask</h3>
+                <div id="spreadSellChart" class="chart-div"></div>
+            </div>
+            <div class="chart-container" style="flex: 2;">
+                 <h3 class="chart-title">做多Spread (买MT5卖OKX): MT5 Ask - OKX Bid</h3>
+                <div id="spreadBuyChart" class="chart-div"></div>
+            </div>
+        </div>
+        
+        <div class="controls-column">
+            <h3>Parameters</h3>
+            <div id="paramsForm">
+                <!-- Params generated here -->
+                <div class="field-row">
+                    <label>Trade Volume (Lot/Oz)</label>
+                    <input type="number" step="0.01" id="tradeVol" value="0.01">
+                </div>
+
+                <div class="field-row">
+                    <label style="display:inline-flex; align-items:center; width:100%; cursor:pointer;">
+                        <input type="checkbox" id="chkAutoTrade" style="width: auto; margin-right: 8px;">
+                        Enable Auto Trade
+                    </label>
+                </div>
+
+                <button type="submit" class="primary">Update Params</button>
+            </div>
+            <button id="updateBtn">Update Params</button>
+            <div style="margin-top: 20px; font-size: 0.8rem; color: #8b949e;">
+                <p>OKX: <span id="okxSymbol">-</span></p>
+                <p>MT5: <span id="mt5Symbol">-</span></p>
+            </div>
+            <div style="margin-top: 20px; border-top: 1px solid var(--border); padding-top: 20px;">
+                <h3>Manual Trading</h3>
+                <div class="control-group">
+                     <label>Volume (Lots)</label>
+                     <input type="number" id="tradeVol" value="0.01" step="0.01">
+                </div>
+                <div style="display: flex; gap: 10px; margin-bottom: 15px;">
+                    <button id="btnLong" style="background-color: var(--green);">Long Spread</button>
+                    <button id="btnShort" style="background-color: var(--red);">Short Spread</button>
+                </div>
+                <div class="control-group">
+                    <label for="chkAutoTrade">Enable Auto Trade</label>
+                    <input type="checkbox" id="chkAutoTrade">
+                </div>
+            </div>
+            
+            <div style="margin-top: 20px; border-top: 1px solid var(--border); padding-top: 20px; max-height: 200px; overflow-y: auto;">
+                 <h3>Order History</h3>
+                 <div id="orderList" style="font-size: 0.8rem;"></div>
+            </div>
+            
+             <div style="margin-top: 20px; border-top: 1px solid var(--border); padding-top: 20px;">
+                 <h3>Backtest</h3>
+                 <button id="loadBacktest" style="background-color: var(--accent);">Load 30D Results</button>
+                 <div id="backtestStats" style="margin-top: 10px; font-size: 0.8rem;"></div>
+             </div>
+        </div>
+    </div>
+
+    <script>
+        function renderAccount(accountState) {
+        if (!accountState) return;
+
+        // MT5
+        const mt5Bal = accountState.balance.mt5;
+        const mt5Pos = accountState.positions.mt5 || [];
+        const mt5Net = mt5Pos.reduce((sum, p) => sum + (p.type === 'buy' ? p.volume : -p.volume), 0);
+        
+        document.getElementById('mt5-equity').textContent = mt5Bal.toFixed(2);
+        document.getElementById('mt5-pos-count').textContent = mt5Pos.length;
+        document.getElementById('mt5-net').textContent = mt5Net.toFixed(2);
+        
+        // Color code net exposure
+        const elMt5Net = document.getElementById('mt5-net');
+        elMt5Net.style.color = mt5Net > 0 ? 'var(--green)' : (mt5Net < 0 ? 'var(--red)' : '#d29922');
+
+        // OKX
+        const okxBal = accountState.balance.okx;
+        const okxPos = accountState.positions.okx || [];
+        let okxNet = 0;
+        okxPos.forEach(p => {
+            let amt = p.amount;
+            if (p.side === 'short') amt = -amt;
+            okxNet += amt;
+        });
+        
+        document.getElementById('okx-balance').textContent = okxBal.toFixed(4);
+        document.getElementById('okx-pos-count').textContent = okxPos.length;
+        document.getElementById('okx-net').textContent = okxNet.toFixed(8);
+
+        const elOkxNet = document.getElementById('okx-net');
+        elOkxNet.style.color = okxNet > 0 ? 'var(--green)' : (okxNet < 0 ? 'var(--red)' : '#d29922');
+    }
+
+    const { createChart, ColorType, CrosshairMode, LineStyle } = LightweightCharts;
+
+        const chartOptions = {
+            layout: {
+                textColor: '#c9d1d9',
+                background: { type: ColorType.Solid, color: '#161b22' },
+            },
+           // timezone: 'Asia/Shanghai', // Set chart timezone to China Standard Time
+           timezone: 'Etc/UTC', // We are manually shifting data to Beijing Time (UTC+8) before feeding to chart
+            grid: {
+                vertLines: { color: '#30363d' },
+                horzLines: { color: '#30363d' },
+            },
+            crosshair: {
+                mode: CrosshairMode.Normal,
+            },
+            timeScale: {
+                timeVisible: true,
+                secondsVisible: false,
+                borderColor: '#30363d',
+            },
+            rightPriceScale: {
+                borderColor: '#30363d',
+            },
+        };
+
+        // 1. Price Chart
+        const priceContainer = document.getElementById('priceChart');
+        const priceChart = createChart(priceContainer, chartOptions);
+        
+        // MT5 Candle Series
+        const mt5Series = priceChart.addSeries(LightweightCharts.CandlestickSeries, {
+            upColor: '#238636', 
+            downColor: '#da3633', 
+            borderUpColor: '#238636',
+            borderDownColor: '#da3633',
+            wickUpColor: '#238636',
+            wickDownColor: '#da3633',
+            title: 'MT5',
+        });
+        
+        // OKX Candle Series
+        const okxSeries = priceChart.addSeries(LightweightCharts.CandlestickSeries, {
+            upColor: '#4caf50', // Green
+            downColor: '#ef5350', // Red
+            borderUpColor: '#4caf50',
+            borderDownColor: '#ef5350',
+            wickUpColor: '#4caf50',
+            wickDownColor: '#ef5350',
+            title: 'OKX',
+        });
+        
+        // 2. Spread Sell Chart (做空Spread)
+        const spreadSellContainer = document.getElementById('spreadSellChart');
+        const spreadSellChart = createChart(spreadSellContainer, chartOptions);
+        
+        // Spread Sell line (MT5 bid - OKX ask) 主动卖MT5买OKX
+        const spreadSellSeries = spreadSellChart.addSeries(LightweightCharts.LineSeries, {
+            color: '#ef5350', // Red - selling spread
+            lineWidth: 2,
+            title: 'Sell Spread',
+        });
+        
+        // EMA on Sell chart
+        const emaSellSeries = spreadSellChart.addSeries(LightweightCharts.LineSeries, {
+            color: '#ffffff',
+            lineWidth: 2,
+            lineStyle: LineStyle.Solid,
+            title: 'EMA',
+        });
+        
+        // Bands for Sell chart
+        let bandSeriesSell = [];
+        
+        // 3. Spread Buy Chart (做多Spread)
+        const spreadBuyContainer = document.getElementById('spreadBuyChart');
+        const spreadBuyChart = createChart(spreadBuyContainer, chartOptions);
+        
+        // Spread Buy line (MT5 ask - OKX bid) 主动买MT5卖OKX  
+        const spreadBuySeries = spreadBuyChart.addSeries(LightweightCharts.LineSeries, {
+            color: '#4caf50', // Green - buying spread
+            lineWidth: 2,
+            title: 'Buy Spread',
+        });
+        
+        // EMA on Buy chart
+        const emaBuySeries = spreadBuyChart.addSeries(LightweightCharts.LineSeries, {
+            color: '#ffffff',
+            lineWidth: 2,
+            lineStyle: LineStyle.Solid,
+            title: 'EMA',
+        });
+        
+        // Bands for Buy chart
+        let bandSeriesBuy = [];
+
+        // Resize observer to handle responsiveness
+        new ResizeObserver(entries => {
+            if (entries.length === 0 || entries[0].target !== priceContainer) { return; }
+            const newRect = entries[0].contentRect;
+            priceChart.applyOptions({ width: newRect.width, height: newRect.height });
+        }).observe(priceContainer);
+
+        new ResizeObserver(entries => {
+            if (entries.length === 0 || entries[0].target !== spreadSellContainer) { return; }
+            const newRect = entries[0].contentRect;
+            spreadSellChart.applyOptions({ width: newRect.width, height: newRect.height });
+        }).observe(spreadSellContainer);
+        
+        new ResizeObserver(entries => {
+            if (entries.length === 0 || entries[0].target !== spreadBuyContainer) { return; }
+            const newRect = entries[0].contentRect;
+            spreadBuyChart.applyOptions({ width: newRect.width, height: newRect.height });
+        }).observe(spreadBuyContainer);
+        
+        // Sync Reference: https://github.com/tradingview/lightweight-charts/issues/322
+        // Simple sync:
+        const charts = [priceChart, spreadSellChart, spreadBuyChart];
+        
+        function syncCharts(sourceChart) {
+            const range = sourceChart.timeScale().getVisibleLogicalRange();
+            if (!range) return;
+            charts.forEach(c => {
+                if (c !== sourceChart) {
+                    c.timeScale().setVisibleLogicalRange(range);
+                }
+            });
+        }
+        
+        charts.forEach(c => {
+            c.timeScale().subscribeVisibleLogicalRangeChange(() => syncCharts(c));
+        });
+
+        // WebSocket
+        let ws;
+        let reconnectTimer;
+        const statusEl = document.getElementById('connectionStatus');
+        
+        function connect() {
+            // Allow override via URL query: ?ws=ws://127.0.0.1:8765/ws  or ?wsHost=127.0.0.1:8765
+            const qs = new URLSearchParams(window.location.search);
+            const wsOverride = qs.get('ws');
+            const wsHostOverride = qs.get('wsHost');
+
+            const isFile = window.location.protocol === 'file:';
+            const isHttps = window.location.protocol === 'https:';
+            const scheme = isHttps ? 'wss' : 'ws';
+
+            const host = wsHostOverride
+                ? wsHostOverride
+                : (isFile ? 'localhost:8765' : window.location.host);
+
+            const url = wsOverride || `${scheme}://${host}/ws`;
+            
+            console.log('Connecting to WS:', url);
+            statusEl.textContent = 'Connecting...';
+            statusEl.className = 'status disconnected';
+
+            try {
+                ws = new WebSocket(url);
+            } catch (e) {
+                console.error('WS Create Error', e);
+                scheduleReconnect();
+                return;
+            }
+            
+            ws.onopen = () => {
+                statusEl.textContent = 'Connected';
+                statusEl.className = 'status connected';
+                if (reconnectTimer) {
+                    clearTimeout(reconnectTimer);
+                    reconnectTimer = null;
+                }
+            };
+            
+            ws.onclose = () => {
+                statusEl.textContent = 'Disconnected (Retrying...)';
+                statusEl.className = 'status disconnected';
+                scheduleReconnect();
+            };
+
+            ws.onerror = (err) => {
+                console.error('WS Error', err);
+                // Some browsers will also trigger onclose; closing here helps normalize behavior.
+                try { ws.close(); } catch (_) {}
+            };
+
+            ws.onmessage = (event) => {
+                try {
+                    const msg = JSON.parse(event.data);
+                    handleMessage(msg);
+                } catch (e) {
+                    console.error('Parse error', e);
+                }
+            };
+        }
+
+        function scheduleReconnect() {
+            if (reconnectTimer) return;
+            reconnectTimer = setTimeout(() => {
+                reconnectTimer = null;
+                connect();
+            }, 3000);
+        }
+
+        const paramsForm = document.getElementById('paramsForm');
+        let currentParams = {};
+        let backtestMarkers = []; // Store markers from loaded backtest
+        let markers = []; // Track markers globally
+        
+        // Shadow data for live marker calculation
+        let globalSpreadData = [];
+        let globalEmaData = [];
+        let globalOrderHistory = []; // Store order history
+        let latestHistoryMsg = null; // Store last history
+
+        function handleMessage(msg) {
+            if (msg.type === 'params') {
+                updateParamsUI(msg.payload);
+            } else if (msg.type === 'account') {
+                renderAccount(msg.payload);
+            } else if (msg.type === 'bar') {
+               updateCharts(msg.payload);
+               renderOrderMarkers(); // Re-render markers as new bar arrives
+            } else if (msg.type === 'history') {
+                latestHistoryMsg = msg.payload;
+                loadHistory(msg.payload);
+            } else if (msg.type === 'orders') {
+                globalOrderHistory = msg.payload;
+                updateOrderList(msg.payload);
+                renderOrderMarkers();
+            } else if (msg.type === 'tick') {
+                updateRealtimeQuotes(msg.payload);
+            }
+        }
+        
+        // --- Real-time Quotes Update ---
+        function updateRealtimeQuotes(tick) {
+            // Update MT5 bid/ask
+            if (tick.mt5_bid !== null) {
+                const el = document.getElementById('rt-mt5-bid');
+                el.textContent = tick.mt5_bid.toFixed(2);
+            }
+            if (tick.mt5_ask !== null) {
+                const el = document.getElementById('rt-mt5-ask');
+                el.textContent = tick.mt5_ask.toFixed(2);
+            }
+            
+            // Update OKX bid/ask
+            if (tick.okx_bid !== null) {
+                const el = document.getElementById('rt-okx-bid');
+                el.textContent = tick.okx_bid.toFixed(2);
+            }
+            if (tick.okx_ask !== null) {
+                const el = document.getElementById('rt-okx-ask');
+                el.textContent = tick.okx_ask.toFixed(2);
+            }
+            
+            // Update spreads with color coding based on EMA
+            const ema = tick.ema;
+            
+            if (tick.spread_sell !== null) {
+                const el = document.getElementById('rt-spread-sell');
+                el.textContent = tick.spread_sell.toFixed(2);
+                // Color: green if below EMA (good for selling), red if above
+                el.style.color = tick.spread_sell > ema ? '#ef5350' : '#4caf50';
+            }
+            
+            if (tick.spread_buy !== null) {
+                const el = document.getElementById('rt-spread-buy');
+                el.textContent = tick.spread_buy.toFixed(2);
+                // Color: green if above EMA (good for buying), red if below
+                el.style.color = tick.spread_buy < ema ? '#ef5350' : '#4caf50';
+            }
+            
+            if (tick.ema !== null) {
+                document.getElementById('rt-ema').textContent = tick.ema.toFixed(2);
+            }
+        }
+        
+        // --- Backtest Visualization ---
+        document.getElementById('loadBacktest').addEventListener('click', async () => {
+             const btn = document.getElementById('loadBacktest');
+             btn.disabled = true;
+             btn.textContent = 'Loading...';
+             
+             try {
+                const res = await fetch('/backtest_results.json');
+                if (!res.ok) throw new Error('Not found');
+                const data = await res.json();
+                
+                // Show stats
+                const s = data.summary;
+                document.getElementById('backtestStats').innerHTML = 
+                    `Trades: ${s.total_trades} | PnL: ${s.total_pnl.toFixed(2)}`;
+                
+                // Plot entry/exits as markers on the spread chart
+                // We need to merge with existing markers
+                
+                // Reset local store
+                backtestMarkers = [];
+                 
+                 // Process trades
+                 data.trades.forEach(t => {
+                     // Entry Marker
+                     backtestMarkers.push({
+                         time: t.entry_ts, // ts is already INT seconds from backtest.py
+                         position: 'belowBar',
+                         color: '#FF9800',
+                         shape: 'arrowUp',
+                         text: `Ent L${t.level}`
+                     });
+                     
+                     // Exit Marker
+                     backtestMarkers.push({
+                         time: t.exit_ts,
+                         position: 'aboveBar',
+                         color: '#9C27B0',
+                         shape: 'arrowDown',
+                         text: `Ex ${t.pnl.toFixed(1)}`
+                     });
+                 });
+                 
+                 // Trigger update to merge
+                 markers = [...backtestMarkers]; // Merge with backtest markers
+                 if(globalSpreadData.length > 0) {
+                     updateMarkers(globalSpreadData, globalEmaData);
+                 } else {
+                     markers.sort((a,b) => a.time - b.time);
+                     spreadSeries.setMarkers(markers);
+                 }
+                 
+             } catch (e) {
+                 alert('Failed to load backtest results: ' + e);
+             } finally {
+                 btn.disabled = false;
+                 btn.textContent = 'Load 30D Results';
+             }
+        });
+        
+        // --- Order Handling ---
+        
+        document.getElementById('btnLong').addEventListener('click', () => {
+             const vol = document.getElementById('tradeVol').value;
+             ws.send(JSON.stringify({
+                 type: 'params',
+                 payload: { tradeVolume: parseFloat(vol) }
+             }));
+             
+             setTimeout(() => {
+                 ws.send(JSON.stringify({ type: 'make_long' }));
+             }, 100);
+        });
+        
+        document.getElementById('btnShort').addEventListener('click', () => {
+             const vol = document.getElementById('tradeVol').value;
+             ws.send(JSON.stringify({
+                 type: 'params',
+                 payload: { tradeVolume: parseFloat(vol) }
+             }));
+             setTimeout(() => {
+                 ws.send(JSON.stringify({ type: 'make_short' }));
+             }, 100);
+        });
+
+        // Auto Trade Checkbox Handler
+        const autoTradeCheckbox = document.getElementById('chkAutoTrade');
+        if (autoTradeCheckbox) {
+            autoTradeCheckbox.addEventListener('change', (e) => {
+                const auto = e.target.checked;
+                ws.send(JSON.stringify({
+                    type: 'params',
+                    payload: { autoTrade: auto }
+                }));
+            });
+        }
+        
+        // Add Close All Button Handler
+        const closeAllBtn = document.createElement('button');
+        
+        // Add "Scroll to Latest" Button
+        const scrollToLatestBtn = document.createElement('button');
+        scrollToLatestBtn.innerText = 'Go to Latest';
+        scrollToLatestBtn.style.backgroundColor = '#1f6feb';
+        scrollToLatestBtn.style.marginTop = '10px';
+        scrollToLatestBtn.onclick = () => {
+             priceChart.timeScale().scrollToPosition(0, true);
+        };
+        document.querySelector('.controls-column').appendChild(scrollToLatestBtn);
+
+        closeAllBtn.innerText = 'CLOSE ALL POSITIONS';
+        closeAllBtn.style.backgroundColor = '#da3633'; // Red
+        closeAllBtn.style.marginTop = '10px';
+        closeAllBtn.onclick = () => {
+             if(confirm("Are you sure you want to CLOSE ALL positions on MT5 and OKX?")) {
+                 ws.send(JSON.stringify({ type: 'close_all' }));
+             }
+        };
+        // Append to control panel
+        document.querySelector('.controls-column').appendChild(closeAllBtn);
+
+        function updateOrderList(orders) {
+            const list = document.getElementById('orderList');
+            list.innerHTML = '';
+            
+            // Show latest first
+            const sorted = [...orders].sort((a,b) => b.id - a.id);
+            
+            sorted.forEach(o => {
+                const item = document.createElement('div');
+                item.style.borderBottom = '1px solid #30363d';
+                item.style.padding = '5px 0';
+                
+                const timeStr = new Date(o.ts).toLocaleTimeString();
+                
+                const color = o.direction === 'long' ? 'var(--green)' : 'var(--red)';
+
+                let statusColor = '#8b949e';
+                if (o.status === 'filled') statusColor = 'var(--green)';
+                if (o.status === 'failed') statusColor = 'var(--red)';
+
+                item.innerHTML = `
+                    <div style="display: flex; justify-content: space-between;">
+                        <span style="font-weight: bold; color: ${color}">${o.direction.toUpperCase()}</span>
+                        <span style="color: #8b949e">${timeStr}</span>
+                    </div>
+                    <div>Vol: ${o.vol} | Status: <span style="color: ${statusColor}">${o.status}</span></div>
+                    ${o.error ? `<div style="color: var(--red); font-size: 0.7em;">${o.error}</div>` : ''}
+                `;
+                list.appendChild(item);
+            });
+        }
+
+        function loadHistory(history) {
+            console.log('Received history:', history);
+            
+            // User request: Add 8 hours to historical time for correct display
+            const OFFSET_SECONDS = 8 * 3600;
+
+            const mt5Data = history.mt5.map(c => ({
+                time: c.time + OFFSET_SECONDS,
+                open: c.open,
+                high: c.high,
+                low: c.low,
+                close: c.close
+            }));
+            
+            const okxData = history.okx.map(c => ({
+                time: c.time + OFFSET_SECONDS,
+                open: c.open,
+                high: c.high,
+                low: c.low,
+                close: c.close
+            }));
+
+            // sort by time just in case
+            mt5Data.sort((a,b) => a.time - b.time);
+            okxData.sort((a,b) => a.time - b.time);
+
+            mt5Series.setData(mt5Data);
+            okxSeries.setData(okxData);
+            
+            // Use pre-calculated spread/EMA from backend if available
+            let spreadData = [];
+            let spreadSellData = [];
+            let spreadBuyData = [];
+            let emaData = [];
+            
+            if (history.spread && history.ema) {
+                spreadData = history.spread.map(d => ({
+                    time: d.time + OFFSET_SECONDS,
+                    value: d.value
+                }));
+                emaData = history.ema.map(d => ({
+                    time: d.time + OFFSET_SECONDS,
+                    value: d.value
+                }));
+                
+                // NEW: Load spread_sell and spread_buy
+                if (history.spread_sell) {
+                    spreadSellData = history.spread_sell.map(d => ({
+                        time: d.time + OFFSET_SECONDS,
+                        value: d.value
+                    }));
+                }
+                if (history.spread_buy) {
+                    spreadBuyData = history.spread_buy.map(d => ({
+                        time: d.time + OFFSET_SECONDS,
+                        value: d.value
+                    }));
+                }
+            } else {
+                // Fallback reconstruction
+                const okxMap = new Map();
+                okxData.forEach(c => okxMap.set(c.time, c));
+                mt5Data.forEach(m => {
+                    const o = okxMap.get(m.time);
+                    if (o) {
+                        spreadData.push({
+                            time: m.time,
+                            value: m.close - o.close
+                        });
+                    }
+                });
+                if (spreadData.length > 0) {
+                     const period = currentParams.emaPeriod || 60; 
+                     emaData = calculateEMA(spreadData, period);
+                }
+                // Use mid spread as fallback for sell/buy
+                spreadSellData = [...spreadData];
+                spreadBuyData = [...spreadData];
+            }
+
+            // Bands
+            // Calculate band values for current parameters
+            const firstSpread = currentParams.firstSpread || 3.0;
+            const nextSpread = currentParams.nextSpread || 1.0;
+            const maxPos = currentParams.maxPos || 3;
+            
+            // Ensure we have enough band series for SELL chart
+            const neededSeriesCount = maxPos * 2; 
+            while (bandSeriesSell.length < neededSeriesCount) {
+                 const i = Math.floor(bandSeriesSell.length / 2);
+                 const lvl = i + 1;
+                 const u = spreadSellChart.addSeries(LightweightCharts.LineSeries, {
+                     color: '#ff6b6b',
+                     lineWidth: 1,
+                     lineStyle: LineStyle.Dashed,
+                     title: `+L${lvl}`
+                 });
+                 const l = spreadSellChart.addSeries(LightweightCharts.LineSeries, {
+                     color: '#69db7c',
+                     lineWidth: 1,
+                     lineStyle: LineStyle.Dashed,
+                     title: `-L${lvl}`
+                 });
+                 bandSeriesSell.push(u);
+                 bandSeriesSell.push(l);
+            }
+            
+            // Ensure we have enough band series for BUY chart
+            while (bandSeriesBuy.length < neededSeriesCount) {
+                 const i = Math.floor(bandSeriesBuy.length / 2);
+                 const lvl = i + 1;
+                 const u = spreadBuyChart.addSeries(LightweightCharts.LineSeries, {
+                     color: '#ff6b6b',
+                     lineWidth: 1,
+                     lineStyle: LineStyle.Dashed,
+                     title: `+L${lvl}`
+                 });
+                 const l = spreadBuyChart.addSeries(LightweightCharts.LineSeries, {
+                     color: '#69db7c',
+                     lineWidth: 1,
+                     lineStyle: LineStyle.Dashed,
+                     title: `-L${lvl}`
+                 });
+                 bandSeriesBuy.push(u);
+                 bandSeriesBuy.push(l);
+            }
+
+            // Calculate band data for ALL time points in emaData
+            const bandDataArr = [];
+            for(let i=0; i<maxPos; i++) bandDataArr.push({ upper: [], lower: [] });
+            
+            emaData.forEach(pt => {
+                 for(let i=0; i<maxPos; i++) {
+                     const lvl = i + 1;
+                     const offset = firstSpread + (lvl - 1) * nextSpread;
+                     bandDataArr[i].upper.push({ time: pt.time, value: pt.value + offset });
+                     bandDataArr[i].lower.push({ time: pt.time, value: pt.value - offset });
+                 }
+            });
+            
+            // Set band data to SELL chart
+            for(let i=0; i<maxPos; i++) {
+                if (bandSeriesSell[i*2]) bandSeriesSell[i*2].setData(bandDataArr[i].upper);
+                if (bandSeriesSell[i*2+1]) bandSeriesSell[i*2+1].setData(bandDataArr[i].lower);
+            }
+            
+            // Set band data to BUY chart
+            for(let i=0; i<maxPos; i++) {
+                if (bandSeriesBuy[i*2]) bandSeriesBuy[i*2].setData(bandDataArr[i].upper);
+                if (bandSeriesBuy[i*2+1]) bandSeriesBuy[i*2+1].setData(bandDataArr[i].lower);
+            }
+
+            if (spreadSellData.length > 0 || spreadBuyData.length > 0) {
+                // Set EMA on both charts
+                emaSellSeries.setData(emaData);
+                emaBuySeries.setData(emaData);
+                
+                // Set spread sell/buy data to respective charts
+                if (spreadSellData.length > 0) {
+                    spreadSellSeries.setData(spreadSellData);
+                }
+                if (spreadBuyData.length > 0) {
+                    spreadBuySeries.setData(spreadBuyData);
+                }
+
+                // Initialize global shadow data for live updates
+                globalSpreadData = [...spreadSellData]; // Use sell data for markers
+                globalEmaData = [...emaData];
+
+                renderOrderMarkers(); 
+            }
+            
+            // Adjust scale to fit
+            priceChart.timeScale().fitContent();
+        }
+
+        function renderOrderMarkers() {
+            // Visualize actual orders from history
+            // Logic: match order timestamp (ISO) to spread data time (seconds + offset)
+            
+            if (!globalSpreadData || globalSpreadData.length === 0) return;
+
+            let currentMarkers = [...backtestMarkers]; 
+            const OFFSET_SECONDS = 8 * 3600; // Same offset as data
+
+            // Helper to find closest spread entry
+            // Assuming spreadData is sorted by time
+            // For live orders, we might need to be precise.
+            
+            // Map orders to markers
+            (globalOrderHistory || []).forEach(o => {
+                 if(!o.ts) return;
+                 const orderDate = new Date(o.ts);
+                 const orderTs = orderDate.getTime() / 1000; // seconds
+                 const chartOrderTs = orderTs + OFFSET_SECONDS; // Align with chart timezone
+                 
+                 // Snap order time to nearest bar time or exact?
+                 // Lightweight charts markers attach to 'time'. If the time doesn't exist in the series,
+                 // it might not show or might float.
+                 // For line series, it's safer to snap to the nearest available bar time
+                 // IF the series is not continuous. But we have minute bars.
+                 
+                 // Find closest bar time
+                 let closestTime = null;
+                 let minDiff = Infinity;
+                 
+                 // Optimization: spreadData is sorted. 
+                 // Simple loop for now (history is usually < 2000 bars)
+                 for(let i=globalSpreadData.length-1; i>=0; i--) {
+                     const t = globalSpreadData[i].time;
+                     const diff = Math.abs(t - chartOrderTs);
+                     if(diff < minDiff) {
+                         minDiff = diff;
+                         closestTime = t;
+                     } 
+                     
+                     // Optimization: If we are scanning backwards and diff starts increasing significantly, we can stop?
+                     // But we must be careful.
+                     // If chartOrderTs > last t, diff decreases as we go deeper? No.
+                     // sorted times: [100, 200, 300]. chartOrderTs = 350.
+                     // i=2 (300): diff=50.
+                     // i=1 (200): diff=150. Growing.
+                     
+                     // If chartOrderTs = 150.
+                     // i=2 (300): diff=150.
+                     // i=1 (200): diff=50. Shrinking.
+                     // i=0 (100): diff=50. Same.
+                     
+                     // So we can't just break if diff > 3600 immediately. 
+                     // But we can check if we moved too far.
+                     if(Math.abs(t - chartOrderTs) > 86400) break; // Look back 24h max
+                 }
+                 
+                 // Relaxed constraint: Allow snapping to bar even if 4 hours apart 
+                 // (e.g. order placed on weekend or during gap)
+                 if(minDiff !== Infinity && minDiff < 4 * 3600) {
+                      let color = '#8b949e';
+                      let shape = 'circle';
+                      let text = '';
+                      
+                      const isFail = o.status.startsWith('failed');
+                      
+                      if (isFail) {
+                          color = '#da3633'; // Red
+                          shape = 'square';
+                          text = 'X ' + o.status.replace('failed_', '');
+                      } else {
+                          if (o.direction === 'long') {
+                              color = '#238636'; // Green
+                              shape = 'arrowUp';
+                              text = 'L';
+                          } else {
+                              color = '#E91E63'; // Red/Pink
+                              shape = 'arrowDown';
+                              text = 'S';
+                          }
+                      }
+                      
+                      currentMarkers.push({
+                          time: closestTime,
+                          position: o.direction === 'long' ? 'belowBar' : 'aboveBar',
+                          color: color,
+                          shape: shape,
+                          text: text + ` (v${o.vol})`
+                      });
+                 }
+            });
+
+            // Deduplicate markers by time + text? 
+            // Lightweight charts handles multiple markers on same time ok, they stack? 
+            // No, they overlap. We might need to adjust.
+            // But let's assume few orders per bar.
+            
+            currentMarkers.sort((a,b) => a.time - b.time);
+            markers = currentMarkers;
+            spreadSeries.setMarkers(markers);
+        }
+
+        function calculateEMA(data, period) {
+             const k = 2 / (period + 1);
+             let ema = data[0].value;
+             return data.map(d => {
+                 ema = d.value * k + ema * (1 - k);
+                 return { time: d.time, value: ema };
+             });
+        }
+
+        function updateParamsUI(params) {
+            currentParams = { ...currentParams, ...params };
+            document.getElementById('mt5Symbol').textContent = params.MT5_SYMBOL || '-';
+            document.getElementById('okxSymbol').textContent = params.OKX_SYMBOL || '-';
+
+            const editableKeys = ['emaPeriod', 'firstSpread', 'nextSpread', 'takeProfit', 'maxPos'];
+            paramsForm.innerHTML = '';
+            
+            editableKeys.forEach(key => {
+                if (params[key] !== undefined) {
+                    const div = document.createElement('div');
+                    div.className = 'control-group';
+                    const label = document.createElement('label');
+                    label.textContent = key;
+                    const input = document.createElement('input');
+                    input.type = 'number';
+                    input.value = params[key];
+                    input.dataset.key = key;
+                    input.step = key.includes('Spread') || key.includes('Profit') ? '0.1' : '1';
+                    div.appendChild(label);
+                    div.appendChild(input);
+                    paramsForm.appendChild(div);
+                }
+            });
+
+            document.getElementById('pTakeProfit').value = params.takeProfit || 6.0;
+            document.getElementById('pMaxPos').value = params.maxPos || 3;
+            document.getElementById('tradeVol').value = params.tradeVolume || 0.01;
+            
+            const chkAuto = document.getElementById('chkAutoTrade');
+            if (chkAuto && params.autoTrade !== undefined) {
+                chkAuto.checked = params.autoTrade;
+            }
+
+            currentParams = params;
+        }
+
+        document.getElementById('updateBtn').addEventListener('click', () => {
+            const inputs = paramsForm.querySelectorAll('input');
+            const payload = {};
+            inputs.forEach(input => {
+                payload[input.dataset.key] = parseFloat(input.value);
+            });
+            // Update tradeVolume specifically if it changed by separate input
+            const v = document.getElementById('tradeVol').value;
+            if(v) payload['tradeVolume'] = parseFloat(v);
+            
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'params', payload }));
+                
+                // Request fresh history to refresh charts with new params
+                setTimeout(() => {
+                    ws.send(JSON.stringify({ type: 'refresh_history' }));
+                }, 200);
+            }
+        });
+
+        // Helper to convert ISO string to timestamp for chart
+        // Lightweight charts expects seconds (UNIX) or 'yyyy-mm-dd' string. 
+        // For intraday, we need UNIX timestamp (seconds).
+        function toTime(isoStr) {
+             return Math.floor(new Date(isoStr).getTime() / 1000); 
+        }
+
+        function updateCharts(bar) {
+            // Apply +8h offset to live data too, to match history
+            const OFFSET_SECONDS = 8 * 3600;
+            const time = toTime(bar.ts) + OFFSET_SECONDS;
+            
+            // 1. Price
+            // MT5
+            if (bar.mt5.close > 0) {
+                 mt5Series.update({
+                    time: time,
+                    open: bar.mt5.open,
+                    high: bar.mt5.high,
+                    low: bar.mt5.low,
+                    close: bar.mt5.close
+                });
+            }
+            // OKX
+            if (bar.okx.close > 0) {
+                okxSeries.update({
+                    time: time,
+                    open: bar.okx.open,
+                    high: bar.okx.high,
+                    low: bar.okx.low,
+                    close: bar.okx.close
+                });
+            }
+            
+            // Legend Update
+            if (bar.mt5.close > 0) document.getElementById('mt5Val').textContent = bar.mt5.close.toFixed(2);
+            if (bar.okx.close > 0) document.getElementById('okxVal').textContent = bar.okx.close.toFixed(2);
+
+            // 2. Spread Sell Chart
+            if (bar.spread_sell !== undefined) {
+                spreadSellSeries.update({ time: time, value: bar.spread_sell });
+            }
+            emaSellSeries.update({ time: time, value: bar.ema });
+            
+            // 3. Spread Buy Chart
+            if (bar.spread_buy !== undefined) {
+                spreadBuySeries.update({ time: time, value: bar.spread_buy });
+            }
+            emaBuySeries.update({ time: time, value: bar.ema });
+            
+            // Update shadow data for markers
+            // We append new bar to global data
+            // To prevent duplicates, check last time
+            if (globalSpreadData.length === 0 || globalSpreadData[globalSpreadData.length-1].time !== time) {
+                globalSpreadData.push({ time: time, value: bar.spread_sell || bar.spread });
+                globalEmaData.push({ time: time, value: bar.ema });
+                
+                // Keep buffer size reasonable
+                if (globalSpreadData.length > 5000) {
+                    globalSpreadData = globalSpreadData.slice(-5000);
+                    globalEmaData = globalEmaData.slice(-5000);
+                }
+                
+                // Re-calculate markers periodically or on new bar?
+                renderOrderMarkers(); // New logic
+            }
+            
+            // Bands for both charts
+            if (bar.bands) {
+                 // Check if series count matches (bar.bands length can change if params change)
+                 const needed = bar.bands.length * 2;
+                 
+                 // Ensure enough band series for SELL chart
+                 while (bandSeriesSell.length < needed) {
+                     const i = Math.floor(bandSeriesSell.length / 2);
+                     const lvl = i + 1;
+                     const u = spreadSellChart.addSeries(LightweightCharts.LineSeries, {
+                         color: '#ff6b6b',
+                         lineWidth: 1,
+                         lineStyle: LineStyle.Dashed,
+                         title: `+L${lvl}`
+                     });
+                     const l = spreadSellChart.addSeries(LightweightCharts.LineSeries, {
+                         color: '#69db7c',
+                         lineWidth: 1,
+                         lineStyle: LineStyle.Dashed,
+                         title: `-L${lvl}`
+                     });
+                     bandSeriesSell.push(u);
+                     bandSeriesSell.push(l);
+                 }
+                 
+                 // Ensure enough band series for BUY chart
+                 while (bandSeriesBuy.length < needed) {
+                     const i = Math.floor(bandSeriesBuy.length / 2);
+                     const lvl = i + 1;
+                     const u = spreadBuyChart.addSeries(LightweightCharts.LineSeries, {
+                         color: '#ff6b6b',
+                         lineWidth: 1,
+                         lineStyle: LineStyle.Dashed,
+                         title: `+L${lvl}`
+                     });
+                     const l = spreadBuyChart.addSeries(LightweightCharts.LineSeries, {
+                         color: '#69db7c',
+                         lineWidth: 1,
+                         lineStyle: LineStyle.Dashed,
+                         title: `-L${lvl}`
+                     });
+                     bandSeriesBuy.push(u);
+                     bandSeriesBuy.push(l);
+                 }
+                
+                // Update bands on both charts
+                bar.bands.forEach((b, i) => {
+                    // SELL chart
+                    const uSeriesSell = bandSeriesSell[i * 2];
+                    const lSeriesSell = bandSeriesSell[i * 2 + 1];
+                    if (uSeriesSell) uSeriesSell.update({ time: time, value: b.upper });
+                    if (lSeriesSell) lSeriesSell.update({ time: time, value: b.lower });
+                    
+                    // BUY chart
+                    const uSeriesBuy = bandSeriesBuy[i * 2];
+                    const lSeriesBuy = bandSeriesBuy[i * 2 + 1];
+                    if (uSeriesBuy) uSeriesBuy.update({ time: time, value: b.upper });
+                    if (lSeriesBuy) lSeriesBuy.update({ time: time, value: b.lower });
+                });
+            }
+        }
+
+        connect();
+    </script>
+</body>
+</html>

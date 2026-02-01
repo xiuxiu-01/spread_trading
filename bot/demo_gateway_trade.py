@@ -16,7 +16,7 @@ SIMULATE = os.getenv('SIMULATE', '0') == '1'
 
 def main():
     # OKX post-only limit far from market to avoid execution
-    okx = OKXGateway(symbol='PAXG/USDT')
+    okx = OKXGateway(symbol='XAU/USDT')
     ticker = okx.get_ticker()
     last = ticker.get('last') or 1.0
     price = round(last * 0.5, 4)  # far below to ensure post-only

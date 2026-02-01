@@ -11,7 +11,7 @@ from gateway.okx_ws import OKXWS
 
 # Create and start the websocket client for the swap contract
 # Assuming XAU-USDT-SWAP is the instrument ID you are interested in.
-# If you are looking for spot, use 'PAXG-USDT' or similar.
+# If you are looking for spot, use 'XAU-USDT' or similar.
 ws = OKXWS(instId="XAU-USDT-SWAP")
 ws.start()
 

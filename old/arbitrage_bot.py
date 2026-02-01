@@ -26,9 +26,9 @@ CONFIG = {
     'mt5_price_file': os.path.expanduser('~/Library/Application Support/MetaQuotes/Terminal/*/MQL5/Files/mt5_xau_price.json'),
     'mt5_cmd_file': os.path.expanduser('~/Library/Application Support/MetaQuotes/Terminal/*/MQL5/Files/mt5_cmd.json'),
     'symbol_mt5': 'XAU',
-    'symbol_okx': 'PAXG/USDT',
+    'symbol_okx': 'XAU/USDT',
     'spread_threshold': 0.5,  # USD
-    'order_size': 0.01,  # amount in XAU lots or PAXG quantity depending on platform
+    'order_size': 0.01,  # amount in XAU lots or XAU quantity depending on platform
     'okx_record_file': 'ticks.jsonl',  # added: WS record file
 }
 
@@ -99,7 +99,7 @@ def get_okx_orderbook(okx, limit=5):
 
 # map symbol formats
 OKX_INST_MAP = {
-    'PAXG/USDT': 'PAXG-USDT'
+    'XAU/USDT': 'XAU-USDT'
 }
 
 class OKXWS:

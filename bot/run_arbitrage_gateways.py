@@ -13,7 +13,7 @@ from gateway.mt5_gateway import MT5Gateway
 
 load_dotenv()
 
-SYMBOL_OKX = os.getenv('OKX_SYMBOL', 'PAXG/USDT')
+SYMBOL_OKX = os.getenv('OKX_SYMBOL', 'XAU/USDT')
 SYMBOL_MT5 = os.getenv('MT5_SYMBOL', 'XAU')
 RECORD_FILE = os.getenv('OKX_RECORD_FILE', 'ticks.jsonl')
 

@@ -4,7 +4,7 @@ from gateway.okx_ws import OKXWS, OKX_INST_MAP
 from old.mt5_client import get_tick, init_mt5, shutdown_mt5
 
 if __name__ == '__main__':
-    inst = OKX_INST_MAP.get('PAXG/USDT', 'PAXG-USDT')
+    inst = OKX_INST_MAP.get('XAU/USDT', 'XAU-USDT')
     record = os.getenv('OKX_RECORD_FILE', 'ticks.jsonl')
     ws = OKXWS(instId=inst, record_file=record)
     ws.start()
