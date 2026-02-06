@@ -1,4 +1,5 @@
 ccxt==3.0.102
+ccxtpro>=0.0.1
 TA-Lib==0.4.24; platform_system != 'Windows'
 MetaTrader5==5.0.5488
 pandas
@@ -8,3 +9,4 @@ websocket-client==1.8.0
 matplotlib
 websockets
 pytz
+aiofiles

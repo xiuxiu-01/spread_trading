@@ -1,0 +1,1408 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Arbitrage Dashboard - Admin</title>
+    <style>
+        :root {
+            --bg-color: #0d1117;
+            --card-bg: #161b22;
+            --sidebar-bg: #0d1117;
+            --text-primary: #c9d1d9;
+            --text-secondary: #8b949e;
+            --accent: #58a6ff;
+            --border: #30363d;
+            --green: #238636;
+            --red: #da3633;
+            --yellow: #d29922;
+            --purple: #a371f7;
+        }
+        
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+            min-height: 100vh;
+            display: flex;
+        }
+
+        /* Sidebar */
+        .sidebar {
+            width: 260px;
+            background: var(--sidebar-bg);
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            position: fixed;
+            height: 100vh;
+            left: 0;
+            top: 0;
+        }
+        
+        .sidebar-header {
+            padding: 20px;
+            border-bottom: 1px solid var(--border);
+        }
+        
+        .sidebar-header h1 {
+            font-size: 1.1rem;
+            color: var(--accent);
+            margin-bottom: 5px;
+        }
+        
+        .sidebar-header .version {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+        }
+        
+        .nav-section {
+            padding: 15px 0;
+            border-bottom: 1px solid var(--border);
+        }
+        
+        .nav-section-title {
+            padding: 0 20px 10px;
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: var(--text-secondary);
+        }
+        
+        .nav-item {
+            display: flex;
+            align-items: center;
+            padding: 10px 20px;
+            color: var(--text-secondary);
+            text-decoration: none;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        
+        .nav-item:hover {
+            background: rgba(88, 166, 255, 0.1);
+            color: var(--text-primary);
+        }
+        
+        .nav-item.active {
+            background: rgba(88, 166, 255, 0.15);
+            color: var(--accent);
+            border-left: 3px solid var(--accent);
+        }
+        
+        .nav-item .icon { width: 20px; margin-right: 12px; text-align: center; }
+        
+        .sidebar-footer {
+            margin-top: auto;
+            padding: 15px 20px;
+            border-top: 1px solid var(--border);
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+        }
+        
+        .connection-status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--red);
+        }
+        
+        .status-dot.connected {
+            background: var(--green);
+            box-shadow: 0 0 6px var(--green);
+        }
+
+        /* Main Content */
+        .main-content {
+            margin-left: 260px;
+            flex: 1;
+            padding: 20px 30px;
+            min-height: 100vh;
+        }
+        
+        .page-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 25px;
+        }
+        
+        .page-title { font-size: 1.5rem; font-weight: 600; }
+        
+        .header-actions { display: flex; gap: 10px; }
+
+        /* Cards & Containers */
+        .card {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 15px 20px;
+            border-bottom: 1px solid var(--border);
+        }
+        
+        .card-title { font-size: 1rem; font-weight: 600; }
+        .card-body { padding: 20px; }
+
+        /* Stats Grid */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 15px;
+            margin-bottom: 25px;
+        }
+        
+        .stat-card {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 20px;
+        }
+        
+        .stat-label { font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 8px; }
+        .stat-value { font-size: 1.8rem; font-weight: 600; font-family: 'Monaco', 'Consolas', monospace; }
+        .stat-value.positive { color: var(--green); }
+        .stat-value.negative { color: var(--red); }
+        .stat-value.neutral { color: var(--accent); }
+
+        /* Symbol Cards */
+        .symbol-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 15px;
+        }
+        
+        .symbol-card {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            overflow: hidden;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        
+        .symbol-card:hover {
+            border-color: var(--accent);
+            transform: translateY(-2px);
+        }
+        
+        .symbol-card-header {
+            padding: 15px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .symbol-name { font-size: 1.1rem; font-weight: 600; }
+        .symbol-code { font-size: 0.8rem; color: var(--text-secondary); }
+        
+        .symbol-card-body { padding: 15px; }
+        
+        .exchange-tags {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-top: 10px;
+        }
+        
+        .exchange-tag {
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 0.7rem;
+            background: rgba(88, 166, 255, 0.1);
+            color: var(--accent);
+        }
+        
+        .exchange-tag.active {
+            background: var(--green);
+            color: white;
+        }
+
+        /* Task Table */
+        table { width: 100%; border-collapse: collapse; }
+        
+        th {
+            text-align: left;
+            padding: 12px 15px;
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--text-secondary);
+            background: rgba(0,0,0,0.2);
+            border-bottom: 1px solid var(--border);
+        }
+        
+        td {
+            padding: 15px;
+            border-bottom: 1px solid var(--border);
+            font-size: 0.9rem;
+        }
+        
+        tr:last-child td { border-bottom: none; }
+        tr:hover { background: rgba(88, 166, 255, 0.05); }
+
+        /* Status Badges */
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 0.75rem;
+            font-weight: 500;
+        }
+        
+        .status-badge.running { background: rgba(35, 134, 54, 0.2); color: var(--green); }
+        .status-badge.stopped { background: rgba(139, 148, 158, 0.2); color: var(--text-secondary); }
+        .status-badge.error { background: rgba(218, 54, 51, 0.2); color: var(--red); }
+        .status-badge::before {
+            content: '';
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            margin-right: 6px;
+            background: currentColor;
+        }
+
+        /* Buttons */
+        .btn {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.85rem;
+            font-weight: 500;
+            transition: all 0.2s;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+        
+        .btn-primary { background: var(--accent); color: white; }
+        .btn-primary:hover { background: #4c9aed; }
+        .btn-success { background: var(--green); color: white; }
+        .btn-danger { background: var(--red); color: white; }
+        .btn-outline { background: transparent; border: 1px solid var(--border); color: var(--text-primary); }
+        .btn-outline:hover { background: rgba(255,255,255,0.05); }
+        .btn-sm { padding: 5px 10px; font-size: 0.75rem; }
+        
+        .action-buttons { display: flex; gap: 5px; }
+
+        /* Modal */
+        .modal-overlay {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.7);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+        }
+        
+        .modal-overlay.active { display: flex; }
+        
+        .modal {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            width: 100%;
+            max-width: 650px;
+            max-height: 90vh;
+            overflow-y: auto;
+        }
+        
+        .modal-header {
+            padding: 20px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .modal-title { font-size: 1.1rem; font-weight: 600; }
+        .modal-close { background: none; border: none; color: var(--text-secondary); font-size: 1.5rem; cursor: pointer; }
+        .modal-body { padding: 20px; }
+        .modal-footer { padding: 15px 20px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 10px; }
+
+        /* Form Elements */
+        .form-group { margin-bottom: 15px; }
+        .form-label { display: block; margin-bottom: 6px; font-size: 0.85rem; color: var(--text-secondary); }
+        
+        .form-input, .form-select {
+            width: 100%;
+            padding: 10px 12px;
+            background: var(--bg-color);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            color: var(--text-primary);
+            font-size: 0.9rem;
+        }
+        
+        .form-input:focus, .form-select:focus { outline: none; border-color: var(--accent); }
+        .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
+
+        /* Exchange Selector */
+        .exchange-selector {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 10px;
+        }
+        
+        .exchange-option {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 12px;
+            background: var(--bg-color);
+            border: 2px solid var(--border);
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        
+        .exchange-option:hover { border-color: var(--accent); }
+        .exchange-option.selected { border-color: var(--green); background: rgba(35, 134, 54, 0.1); }
+        .exchange-option.disabled { opacity: 0.4; cursor: not-allowed; }
+        .exchange-option input { display: none; }
+        .exchange-icon { font-size: 1.2rem; }
+        .exchange-name { font-weight: 500; }
+        .exchange-symbol { font-size: 0.75rem; color: var(--text-secondary); }
+
+        /* Task Detail View */
+        .task-detail { display: none; }
+        .task-detail.active { display: block; }
+        
+        .back-link {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            color: var(--accent);
+            text-decoration: none;
+            margin-bottom: 20px;
+            cursor: pointer;
+        }
+        
+        .back-link:hover { text-decoration: underline; }
+        
+        .detail-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 20px;
+        }
+        
+        .detail-section { 
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 20px;
+        }
+        
+        .detail-section h4 {
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid var(--border);
+        }
+        
+        .detail-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid rgba(48, 54, 61, 0.5);
+        }
+        
+        .detail-label { color: var(--text-secondary); }
+        .detail-value { font-weight: 500; font-family: 'Monaco', monospace; }
+
+        /* Spread Chart Container */
+        .chart-container {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 20px;
+            height: 300px;
+        }
+
+        /* Responsive */
+        @media (max-width: 1024px) {
+            .sidebar { width: 60px; }
+            .sidebar-header h1, .sidebar-header .version, .nav-section-title, .nav-item span:not(.icon), .sidebar-footer span { display: none; }
+            .nav-item .icon { margin-right: 0; }
+            .main-content { margin-left: 60px; }
+        }
+    </style>
+</head>
+<body>
+    <!-- Sidebar -->
+    <nav class="sidebar">
+        <div class="sidebar-header">
+            <h1>🔄 Arbitrage</h1>
+            <span class="version">Multi-Exchange v2.0</span>
+        </div>
+        
+        <div class="nav-section">
+            <div class="nav-section-title">Overview</div>
+            <a class="nav-item active" onclick="showPage('dashboard')">
+                <span class="icon">📊</span>
+                <span>Dashboard</span>
+            </a>
+            <a class="nav-item" onclick="showPage('symbols')">
+                <span class="icon">💹</span>
+                <span>Symbols</span>
+            </a>
+            <a class="nav-item" onclick="showPage('tasks')">
+                <span class="icon">⚡</span>
+                <span>Active Tasks</span>
+            </a>
+        </div>
+        
+        <div class="nav-section">
+            <div class="nav-section-title">Tools</div>
+            <a class="nav-item" href="index.html">
+                <span class="icon">📈</span>
+                <span>Charts</span>
+            </a>
+            <a class="nav-item" onclick="showPage('settings')">
+                <span class="icon">⚙️</span>
+                <span>Settings</span>
+            </a>
+        </div>
+        
+        <div class="sidebar-footer">
+            <div class="connection-status">
+                <div class="status-dot" id="wsStatus"></div>
+                <span id="wsStatusText">Disconnected</span>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <main class="main-content">
+        <!-- Dashboard Page -->
+        <div id="page-dashboard" class="page active">
+            <div class="page-header">
+                <h2 class="page-title">Dashboard</h2>
+                <div class="header-actions">
+                    <button class="btn btn-outline" onclick="refreshDashboard()">🔄 Refresh</button>
+                    <button class="btn btn-primary" onclick="openNewTaskModal()">➕ New Arbitrage</button>
+                </div>
+            </div>
+            
+            <!-- Stats -->
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-label">Running Tasks</div>
+                    <div class="stat-value neutral" id="runningTasks">0</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Total PnL</div>
+                    <div class="stat-value" id="totalPnl">$0.00</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Total Trades</div>
+                    <div class="stat-value neutral" id="totalTrades">0</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Active Symbols</div>
+                    <div class="stat-value neutral" id="activeSymbols">0</div>
+                </div>
+            </div>
+            
+            <!-- Active Tasks -->
+            <div class="card">
+                <div class="card-header">
+                    <h3 class="card-title">Active Arbitrage Tasks</h3>
+                </div>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Task</th>
+                            <th>Symbol</th>
+                            <th>Exchanges</th>
+                            <th>Status</th>
+                            <th>Spread</th>
+                            <th>Position</th>
+                            <th>PnL</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="tasksTable">
+                        <tr>
+                            <td colspan="8" style="text-align: center; color: var(--text-secondary);">
+                                No active tasks. Click "New Arbitrage" to create one.
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Symbols Page -->
+        <div id="page-symbols" class="page" style="display: none;">
+            <div class="page-header">
+                <h2 class="page-title">Available Symbols</h2>
+            </div>
+            <div class="symbol-grid" id="symbolGrid">
+                <!-- Will be populated by JS -->
+            </div>
+        </div>
+
+        <!-- Tasks Page (Active Tasks Full List) -->
+        <div id="page-tasks" class="page" style="display: none;">
+            <div class="page-header">
+                <h2 class="page-title">All Arbitrage Tasks</h2>
+                <div class="header-actions">
+                    <button class="btn btn-primary" onclick="openNewTaskModal()">➕ New Arbitrage</button>
+                </div>
+            </div>
+            <div class="card">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Task ID</th>
+                            <th>Symbol</th>
+                            <th>Exchange A</th>
+                            <th>Exchange B</th>
+                            <th>Status</th>
+                            <th>Current Spread</th>
+                            <th>Level</th>
+                            <th>PnL</th>
+                            <th>Created</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="allTasksTable">
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Task Detail Page -->
+        <div id="page-task-detail" class="page" style="display: none;">
+            <a class="back-link" onclick="showPage('dashboard')">← Back to Dashboard</a>
+            <div class="page-header">
+                <h2 class="page-title" id="detailTaskTitle">Task Details</h2>
+                <div class="header-actions">
+                    <button class="btn btn-outline" id="btnToggleTask" onclick="toggleCurrentTask()">⏸️ Pause</button>
+                    <button class="btn btn-danger" id="btnCloseTask" onclick="closeCurrentPosition()">Close Position</button>
+                </div>
+            </div>
+            
+            <!-- Live Chart -->
+            <div class="chart-container" id="detailChart">
+                <canvas id="spreadCanvas"></canvas>
+            </div>
+            
+            <div class="detail-grid" id="taskDetailGrid">
+                <!-- Will be populated by JS -->
+            </div>
+        </div>
+
+        <!-- Settings Page -->
+        <div id="page-settings" class="page" style="display: none;">
+            <div class="page-header">
+                <h2 class="page-title">Settings</h2>
+            </div>
+            <div class="card">
+                <div class="card-header">
+                    <h3 class="card-title">Global Settings</h3>
+                </div>
+                <div class="card-body">
+                    <div class="form-group">
+                        <label class="form-label">Dry Run Mode</label>
+                        <select class="form-select" id="settingDryRun">
+                            <option value="true" selected>Enabled (no real orders)</option>
+                            <option value="false">Disabled (real trading)</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Default Trade Volume</label>
+                        <input type="number" class="form-input" id="settingDefaultVolume" value="0.01" step="0.01">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">WebSocket Server</label>
+                        <input type="text" class="form-input" id="settingWsServer" value="ws://localhost:8766/ws" readonly>
+                    </div>
+                    <button class="btn btn-primary" onclick="saveSettings()">Save Settings</button>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- New Task Modal -->
+    <div class="modal-overlay" id="newTaskModal">
+        <div class="modal">
+            <div class="modal-header">
+                <h3 class="modal-title">Create Arbitrage Task</h3>
+                <button class="modal-close" onclick="closeNewTaskModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <!-- Step 1: Select Symbol -->
+                <div class="form-group">
+                    <label class="form-label">1. Select Trading Pair</label>
+                    <select class="form-select" id="modalSymbol" onchange="onSymbolChange()">
+                        <option value="XAUUSD">🥇 Gold (XAU/USD)</option>
+                        <option value="XAGUSD">🥈 Silver (XAG/USD)</option>
+                    </select>
+                </div>
+                
+                <!-- Symbol Info -->
+                <div id="symbolInfo" class="symbol-info" style="background: var(--card-bg); border-radius: 8px; padding: 12px; margin-bottom: 15px;">
+                    <!-- Populated by JS -->
+                </div>
+                
+                <!-- Step 2: Select Exchanges -->
+                <div class="form-group">
+                    <label class="form-label">2. Select Exchange Pair (套利双边)</label>
+                    <div style="display: flex; gap: 15px; margin-top: 10px;">
+                        <div style="flex: 1;">
+                            <div style="font-size: 0.75rem; color: var(--text-secondary); margin-bottom: 8px;">Exchange A (买入端)</div>
+                            <div class="exchange-selector" id="exchangeASelector">
+                                <!-- Will be populated by JS -->
+                            </div>
+                        </div>
+                        <div style="display: flex; align-items: center; font-size: 1.5rem; color: var(--text-secondary);">↔</div>
+                        <div style="flex: 1;">
+                            <div style="font-size: 0.75rem; color: var(--text-secondary); margin-bottom: 8px;">Exchange B (卖出端)</div>
+                            <div class="exchange-selector" id="exchangeBSelector">
+                                <!-- Will be populated by JS -->
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Selected pair summary -->
+                <div id="pairSummary" style="background: var(--bg-secondary); border-radius: 8px; padding: 12px; margin-bottom: 15px; display: none;">
+                </div>
+                
+                <hr style="border-color: var(--border); margin: 20px 0;">
+                
+                <!-- Step 3: Strategy Parameters -->
+                <h4 style="font-size: 0.9rem; margin-bottom: 15px;">Strategy Parameters</h4>
+                
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label">EMA Period</label>
+                        <input type="number" class="form-input" id="modalEmaPeriod" value="20">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">First Spread (L1 Entry)</label>
+                        <input type="number" class="form-input" id="modalFirstSpread" value="3.0" step="0.1">
+                    </div>
+                </div>
+                
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label">Next Spread (L2+ Entry)</label>
+                        <input type="number" class="form-input" id="modalNextSpread" value="1.0" step="0.1">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Take Profit</label>
+                        <input type="number" class="form-input" id="modalTakeProfit" value="0.5" step="0.1">
+                    </div>
+                </div>
+                
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label">Max Positions</label>
+                        <input type="number" class="form-input" id="modalMaxPos" value="3" min="1" max="10">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Trade Volume</label>
+                        <input type="number" class="form-input" id="modalTradeVol" value="0.01" step="0.01">
+                    </div>
+                </div>
+                
+                <div class="form-group">
+                    <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                        <input type="checkbox" id="modalDryRun" checked style="width: 18px; height: 18px;">
+                        <span>Dry Run (simulate orders)</span>
+                    </label>
+                </div>
+                
+                <div class="form-group">
+                    <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                        <input type="checkbox" id="modalAutoStart" checked style="width: 18px; height: 18px;">
+                        <span>Auto-start after creation</span>
+                    </label>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline" onclick="closeNewTaskModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="createNewTask()">Create Task</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // =================================================================
+        // Configuration Data (symbol mappings for each exchange)
+        // =================================================================
+        const SYMBOLS = {
+            XAUUSD: {
+                name: "Gold (XAU/USD)",
+                code: "XAUUSD",
+                icon: "🥇",
+                exchanges: {
+                    mt5: "XAUUSD",
+                    okx: "XAU/USDT:USDT",
+                    binance: "PAXG/USDT",
+                    bybit: "XAUUSDT",
+                    gate: "PAXG_USDT",
+                    bitget: "XAUUSDT"
+                },
+                defaultParams: { firstSpread: 3.0, nextSpread: 1.0, takeProfit: 0.5, lotSize: 0.01 }
+            },
+            XAGUSD: {
+                name: "Silver (XAG/USD)",
+                code: "XAGUSD",
+                icon: "🥈",
+                exchanges: {
+                    mt5: "XAGUSD",
+                    okx: "XAG/USDT:USDT",
+                    bybit: "XAGUSDT",
+                    bitget: "XAGUSDT"
+                },
+                defaultParams: { firstSpread: 0.15, nextSpread: 0.05, takeProfit: 0.03, lotSize: 0.5 }
+            },
+            BTCUSD: {
+                name: "Bitcoin (BTC/USD)",
+                code: "BTCUSD",
+                icon: "₿",
+                exchanges: {
+                    mt5: "BTCUSD",
+                    okx: "BTC/USDT:USDT",
+                    binance: "BTC/USDT",
+                    bybit: "BTCUSDT",
+                    gate: "BTC_USDT",
+                    bitget: "BTCUSDT",
+                    bitmart: "BTC_USDT",
+                    lbank: "btc_usdt"
+                },
+                defaultParams: { firstSpread: 50.0, nextSpread: 20.0, takeProfit: 10.0, lotSize: 0.001 }
+            },
+            ETHUSD: {
+                name: "Ethereum (ETH/USD)",
+                code: "ETHUSD",
+                icon: "Ξ",
+                exchanges: {
+                    mt5: "ETHUSD",
+                    okx: "ETH/USDT:USDT",
+                    binance: "ETH/USDT",
+                    bybit: "ETHUSDT",
+                    gate: "ETH_USDT",
+                    bitget: "ETHUSDT",
+                    bitmart: "ETH_USDT",
+                    lbank: "eth_usdt"
+                },
+                defaultParams: { firstSpread: 5.0, nextSpread: 2.0, takeProfit: 1.0, lotSize: 0.01 }
+            }
+        };
+        
+        const EXCHANGES = {
+            mt5: { name: "MetaTrader 5", icon: "📊", type: "forex", color: "#00a2e8" },
+            okx: { name: "OKX", icon: "🟠", type: "crypto", color: "#00dc82" },
+            binance: { name: "Binance", icon: "🟡", type: "crypto", color: "#f0b90b" },
+            bybit: { name: "Bybit", icon: "🔵", type: "crypto", color: "#f7a600" },
+            gate: { name: "Gate.io", icon: "🟢", type: "crypto", color: "#17b592" },
+            bitget: { name: "Bitget", icon: "🟣", type: "crypto", color: "#00f0ff" },
+            bitmart: { name: "BitMart", icon: "⚫", type: "crypto", color: "#49c7b4" },
+            lbank: { name: "LBank", icon: "🔴", type: "crypto", color: "#0066ff" }
+        };
+
+        // =================================================================
+        // State
+        // =================================================================
+        let ws;
+        let reconnectTimer;
+        let tasks = [];
+        let selectedExchangeA = 'mt5';
+        let selectedExchangeB = 'okx';
+        let currentDetailTaskId = null;
+
+        // =================================================================
+        // WebSocket
+        // =================================================================
+        function connect() {
+            const wsPort = 8766;
+            const wsHost = window.location.hostname || 'localhost';
+            const wsUrl = `ws://${wsHost}:${wsPort}/ws`;
+            
+            try {
+                ws = new WebSocket(wsUrl);
+            } catch (e) {
+                console.error('WebSocket error:', e);
+                scheduleReconnect();
+                return;
+            }
+            
+            ws.onopen = () => {
+                updateConnectionStatus(true);
+                ws.send(JSON.stringify({ type: 'get_dashboard' }));
+                ws.send(JSON.stringify({ type: 'get_tasks' }));
+            };
+            
+            ws.onclose = () => {
+                updateConnectionStatus(false);
+                scheduleReconnect();
+            };
+            
+            ws.onerror = (e) => {
+                console.error('WebSocket error:', e);
+            };
+            
+            ws.onmessage = (event) => {
+                try {
+                    handleMessage(JSON.parse(event.data));
+                } catch (e) {
+                    console.error('Parse error:', e);
+                }
+            };
+        }
+        
+        function scheduleReconnect() {
+            if (reconnectTimer) return;
+            reconnectTimer = setTimeout(() => {
+                reconnectTimer = null;
+                connect();
+            }, 3000);
+        }
+        
+        function updateConnectionStatus(connected) {
+            document.getElementById('wsStatus').classList.toggle('connected', connected);
+            document.getElementById('wsStatusText').textContent = connected ? 'Connected' : 'Disconnected';
+        }
+        
+        function handleMessage(msg) {
+            if (msg.type === 'dashboard') {
+                updateDashboard(msg.payload);
+            } else if (msg.type === 'tasks') {
+                tasks = msg.payload || [];
+                updateTasksTable();
+                updateAllTasksTable();
+            } else if (msg.type === 'task_created' || msg.type === 'task_status') {
+                refreshDashboard();
+            } else if (msg.type === 'tick') {
+                updateLiveTick(msg.payload);
+            } else if (msg.type === 'error') {
+                alert(`Error: ${msg.message}`);
+            }
+        }
+
+        // =================================================================
+        // Dashboard
+        // =================================================================
+        function updateDashboard(data) {
+            document.getElementById('runningTasks').textContent = data.running_tasks || 0;
+            
+            const pnl = data.total_pnl || 0;
+            const pnlEl = document.getElementById('totalPnl');
+            pnlEl.textContent = `$${pnl.toFixed(2)}`;
+            pnlEl.className = 'stat-value ' + (pnl > 0 ? 'positive' : pnl < 0 ? 'negative' : 'neutral');
+            
+            document.getElementById('totalTrades').textContent = data.total_trades || 0;
+            document.getElementById('activeSymbols').textContent = new Set(tasks.map(t => t.symbol)).size;
+            
+            if (data.tasks) {
+                tasks = data.tasks;
+                updateTasksTable();
+            }
+        }
+        
+        function updateTasksTable() {
+            const tbody = document.getElementById('tasksTable');
+            
+            if (!tasks || tasks.length === 0) {
+                tbody.innerHTML = `
+                    <tr><td colspan="8" style="text-align: center; color: var(--text-secondary);">
+                        No active tasks. Click "New Arbitrage" to create one.
+                    </td></tr>`;
+                return;
+            }
+            
+            tbody.innerHTML = tasks.map(task => `
+                <tr onclick="showTaskDetail('${task.task_id}')" style="cursor: pointer;">
+                    <td><strong>${task.task_id}</strong></td>
+                    <td>${SYMBOLS[task.symbol]?.icon || ''} ${task.symbol || task.symbol_a}</td>
+                    <td>
+                        <span style="color: ${EXCHANGES[task.exchange_a]?.color || '#fff'}">${(task.exchange_a || '').toUpperCase()}</span>
+                        ↔
+                        <span style="color: ${EXCHANGES[task.exchange_b]?.color || '#fff'}">${(task.exchange_b || '').toUpperCase()}</span>
+                    </td>
+                    <td><span class="status-badge ${task.status}">${task.status}</span></td>
+                    <td>${(task.current_spread || 0).toFixed(2)}</td>
+                    <td>L${task.current_level || 0} ${task.direction || 'flat'}</td>
+                    <td class="${(task.total_pnl || 0) >= 0 ? 'positive' : 'negative'}">$${(task.total_pnl || 0).toFixed(2)}</td>
+                    <td>
+                        <div class="action-buttons" onclick="event.stopPropagation();">
+                            ${task.status === 'running' 
+                                ? `<button class="btn btn-sm btn-outline" onclick="stopTask('${task.task_id}')" title="Pause">⏸️</button>`
+                                : `<button class="btn btn-sm btn-success" onclick="startTask('${task.task_id}')" title="Start">▶️</button>`
+                            }
+                            <button class="btn btn-sm btn-danger" onclick="removeTask('${task.task_id}')" title="Delete">🗑️</button>
+                        </div>
+                    </td>
+                </tr>
+            `).join('');
+        }
+        
+        function updateAllTasksTable() {
+            const tbody = document.getElementById('allTasksTable');
+            if (!tbody) return;
+            
+            if (!tasks || tasks.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="10" style="text-align: center; color: var(--text-secondary);">No tasks</td></tr>`;
+                return;
+            }
+            
+            tbody.innerHTML = tasks.map(task => `
+                <tr>
+                    <td><a href="#" onclick="showTaskDetail('${task.task_id}'); return false;">${task.task_id}</a></td>
+                    <td>${SYMBOLS[task.symbol]?.icon || ''} ${task.symbol}</td>
+                    <td>${EXCHANGES[task.exchange_a]?.icon || ''} ${task.exchange_a?.toUpperCase()}</td>
+                    <td>${EXCHANGES[task.exchange_b]?.icon || ''} ${task.exchange_b?.toUpperCase()}</td>
+                    <td><span class="status-badge ${task.status}">${task.status}</span></td>
+                    <td>${(task.current_spread || 0).toFixed(2)}</td>
+                    <td>L${task.current_level || 0}</td>
+                    <td class="${(task.total_pnl || 0) >= 0 ? 'positive' : 'negative'}">$${(task.total_pnl || 0).toFixed(2)}</td>
+                    <td>${task.created_at || '-'}</td>
+                    <td>
+                        <div class="action-buttons">
+                            ${task.status === 'running' 
+                                ? `<button class="btn btn-sm btn-outline" onclick="stopTask('${task.task_id}')">⏸️</button>`
+                                : `<button class="btn btn-sm btn-success" onclick="startTask('${task.task_id}')">▶️</button>`
+                            }
+                            <button class="btn btn-sm btn-danger" onclick="removeTask('${task.task_id}')">🗑️</button>
+                        </div>
+                    </td>
+                </tr>
+            `).join('');
+        }
+        
+        function refreshDashboard() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'get_dashboard' }));
+                ws.send(JSON.stringify({ type: 'get_tasks' }));
+            }
+        }
+
+        // =================================================================
+        // Symbols Page
+        // =================================================================
+        function renderSymbolsPage() {
+            const grid = document.getElementById('symbolGrid');
+            grid.innerHTML = Object.entries(SYMBOLS).map(([code, sym]) => {
+                const supportedExchanges = Object.keys(sym.exchanges);
+                const activeTasks = tasks.filter(t => t.symbol === code);
+                
+                return `
+                    <div class="symbol-card" onclick="openNewTaskModalForSymbol('${code}')">
+                        <div class="symbol-card-header">
+                            <div>
+                                <div class="symbol-name">${sym.icon} ${sym.name}</div>
+                                <div class="symbol-code">${code}</div>
+                            </div>
+                            ${activeTasks.length > 0 
+                                ? `<span class="status-badge running">${activeTasks.length} active</span>`
+                                : ''
+                            }
+                        </div>
+                        <div class="symbol-card-body">
+                            <p style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 10px;">
+                                Supported on ${supportedExchanges.length} exchanges
+                            </p>
+                            <div class="exchange-tags">
+                                ${supportedExchanges.map(ex => `
+                                    <span class="exchange-tag ${activeTasks.some(t => t.exchange_a === ex || t.exchange_b === ex) ? 'active' : ''}">
+                                        ${EXCHANGES[ex]?.icon || ''} ${ex.toUpperCase()}
+                                    </span>
+                                `).join('')}
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        // =================================================================
+        // Task Detail
+        // =================================================================
+        function showTaskDetail(taskId) {
+            const task = tasks.find(t => t.task_id === taskId);
+            if (!task) return;
+            
+            // 跳转到 index.html 并传递任务 ID
+            const url = `index.html?task=${encodeURIComponent(taskId)}`;
+            window.location.href = url;
+            return;
+            
+            // 下面的代码暂时保留但不执行
+            currentDetailTaskId = taskId;
+            document.getElementById('detailTaskTitle').textContent = `${SYMBOLS[task.symbol]?.icon || ''} ${task.symbol} - ${task.task_id}`;
+            
+            // Update toggle button
+            const btnToggle = document.getElementById('btnToggleTask');
+            if (task.status === 'running') {
+                btnToggle.innerHTML = '⏸️ Pause';
+                btnToggle.className = 'btn btn-outline';
+            } else {
+                btnToggle.innerHTML = '▶️ Resume';
+                btnToggle.className = 'btn btn-success';
+            }
+            
+            document.getElementById('taskDetailGrid').innerHTML = `
+                <div class="detail-section">
+                    <h4>📊 Configuration</h4>
+                    <div class="detail-row"><span class="detail-label">Task ID</span><span class="detail-value">${task.task_id}</span></div>
+                    <div class="detail-row"><span class="detail-label">Symbol</span><span class="detail-value">${task.symbol || task.symbol_a}</span></div>
+                    <div class="detail-row"><span class="detail-label">Exchange A</span><span class="detail-value">${EXCHANGES[task.exchange_a]?.icon || ''} ${task.exchange_a?.toUpperCase()}<br><small style="color:var(--text-secondary)">${task.symbol_a}</small></span></div>
+                    <div class="detail-row"><span class="detail-label">Exchange B</span><span class="detail-value">${EXCHANGES[task.exchange_b]?.icon || ''} ${task.exchange_b?.toUpperCase()}<br><small style="color:var(--text-secondary)">${task.symbol_b}</small></span></div>
+                    <div class="detail-row"><span class="detail-label">Status</span><span class="detail-value"><span class="status-badge ${task.status}">${task.status}</span></span></div>
+                    <div class="detail-row"><span class="detail-label">Dry Run</span><span class="detail-value">${task.config?.dryRun ? '✅ Yes' : '❌ No'}</span></div>
+                </div>
+                
+                <div class="detail-section">
+                    <h4>📈 Live Data</h4>
+                    <div class="detail-row"><span class="detail-label">Current Spread (Sell)</span><span class="detail-value" id="live_spread_sell">-</span></div>
+                    <div class="detail-row"><span class="detail-label">Current Spread (Buy)</span><span class="detail-value" id="live_spread_buy">-</span></div>
+                    <div class="detail-row"><span class="detail-label">EMA</span><span class="detail-value" id="live_ema">-</span></div>
+                    <div class="detail-row"><span class="detail-label">Direction</span><span class="detail-value" id="live_direction">${task.direction || 'flat'}</span></div>
+                    <div class="detail-row"><span class="detail-label">Level</span><span class="detail-value" id="live_level">L${task.current_level || 0}</span></div>
+                </div>
+                
+                <div class="detail-section">
+                    <h4>💰 Performance</h4>
+                    <div class="detail-row"><span class="detail-label">Total PnL</span><span class="detail-value ${(task.total_pnl || 0) >= 0 ? 'positive' : 'negative'}" id="live_pnl">$${(task.total_pnl || 0).toFixed(2)}</span></div>
+                    <div class="detail-row"><span class="detail-label">Total Trades</span><span class="detail-value">${task.total_trades || 0}</span></div>
+                    <div class="detail-row"><span class="detail-label">Win Rate</span><span class="detail-value">${task.win_rate ? task.win_rate + '%' : '-'}</span></div>
+                    <div class="detail-row"><span class="detail-label">Avg Trade PnL</span><span class="detail-value">${task.avg_trade_pnl ? '$' + task.avg_trade_pnl.toFixed(2) : '-'}</span></div>
+                </div>
+                
+                <div class="detail-section">
+                    <h4>⚙️ Strategy Settings</h4>
+                    <div class="detail-row"><span class="detail-label">EMA Period</span><span class="detail-value">${task.config?.emaPeriod || 20}</span></div>
+                    <div class="detail-row"><span class="detail-label">First Spread (L1)</span><span class="detail-value">${task.config?.firstSpread || 3.0}</span></div>
+                    <div class="detail-row"><span class="detail-label">Next Spread (L2+)</span><span class="detail-value">${task.config?.nextSpread || 1.0}</span></div>
+                    <div class="detail-row"><span class="detail-label">Take Profit</span><span class="detail-value">${task.config?.takeProfit || 0.5}</span></div>
+                    <div class="detail-row"><span class="detail-label">Max Positions</span><span class="detail-value">${task.config?.maxPos || 3}</span></div>
+                    <div class="detail-row"><span class="detail-label">Trade Volume</span><span class="detail-value">${task.config?.tradeVolume || 0.01}</span></div>
+                </div>
+            `;
+            
+            showPage('task-detail');
+        }
+        
+        function toggleCurrentTask() {
+            if (!currentDetailTaskId) return;
+            const task = tasks.find(t => t.task_id === currentDetailTaskId);
+            if (!task) return;
+            
+            if (task.status === 'running') {
+                stopTask(currentDetailTaskId);
+            } else {
+                startTask(currentDetailTaskId);
+            }
+        }
+        
+        function closeCurrentPosition() {
+            if (!currentDetailTaskId) return;
+            if (confirm('Close all positions for this task?')) {
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ 
+                        type: 'close_position', 
+                        payload: { task_id: currentDetailTaskId } 
+                    }));
+                }
+            }
+        }
+        
+        function updateLiveTick(tick) {
+            // Update live data in task detail view if viewing current task
+            if (tick.task_id && tick.task_id === currentDetailTaskId) {
+                if (document.getElementById('live_spread_sell')) {
+                    document.getElementById('live_spread_sell').textContent = (tick.spread_sell || 0).toFixed(2);
+                }
+                if (document.getElementById('live_spread_buy')) {
+                    document.getElementById('live_spread_buy').textContent = (tick.spread_buy || 0).toFixed(2);
+                }
+                if (document.getElementById('live_ema')) {
+                    document.getElementById('live_ema').textContent = (tick.ema || 0).toFixed(2);
+                }
+            }
+        }
+
+        // =================================================================
+        // New Task Modal
+        // =================================================================
+        function openNewTaskModal() {
+            document.getElementById('newTaskModal').classList.add('active');
+            // Set defaults
+            selectedExchangeA = 'mt5';
+            selectedExchangeB = 'okx';
+            onSymbolChange();
+        }
+        
+        function openNewTaskModalForSymbol(symbolCode) {
+            document.getElementById('modalSymbol').value = symbolCode;
+            openNewTaskModal();
+        }
+        
+        function closeNewTaskModal() {
+            document.getElementById('newTaskModal').classList.remove('active');
+        }
+        
+        function onSymbolChange() {
+            const symbolCode = document.getElementById('modalSymbol').value;
+            const symbol = SYMBOLS[symbolCode];
+            if (!symbol) return;
+            
+            // Update default params
+            document.getElementById('modalFirstSpread').value = symbol.defaultParams.firstSpread;
+            document.getElementById('modalNextSpread').value = symbol.defaultParams.nextSpread;
+            document.getElementById('modalTakeProfit').value = symbol.defaultParams.takeProfit;
+            document.getElementById('modalTradeVol').value = symbol.defaultParams.lotSize;
+            
+            // 显示品种信息
+            const infoEl = document.getElementById('symbolInfo');
+            const supportedExchanges = Object.keys(symbol.exchanges);
+            infoEl.innerHTML = `
+                <div style="font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 8px;">该品种在以下交易所可交易:</div>
+                <div style="display: flex; flex-wrap: wrap; gap: 6px;">
+                    ${supportedExchanges.map(ex => `
+                        <span style="background: ${EXCHANGES[ex]?.color || '#666'}22; color: ${EXCHANGES[ex]?.color || '#fff'}; padding: 4px 8px; border-radius: 4px; font-size: 0.75rem;">
+                            ${EXCHANGES[ex]?.icon || ''} ${ex.toUpperCase()}: ${symbol.exchanges[ex]}
+                        </span>
+                    `).join('')}
+                </div>
+            `;
+            
+            // Ensure selected exchanges are valid for this symbol
+            if (!supportedExchanges.includes(selectedExchangeA)) {
+                selectedExchangeA = supportedExchanges[0];
+            }
+            if (!supportedExchanges.includes(selectedExchangeB) || selectedExchangeB === selectedExchangeA) {
+                selectedExchangeB = supportedExchanges.find(e => e !== selectedExchangeA) || supportedExchanges[1];
+            }
+            
+            // Render exchange selectors
+            renderExchangeSelector('exchangeASelector', symbol, 'A');
+            renderExchangeSelector('exchangeBSelector', symbol, 'B');
+            
+            // Update pair summary
+            updatePairSummary();
+        }
+        
+        function updatePairSummary() {
+            const symbolCode = document.getElementById('modalSymbol').value;
+            const symbol = SYMBOLS[symbolCode];
+            if (!symbol) return;
+            
+            const summaryEl = document.getElementById('pairSummary');
+            if (selectedExchangeA && selectedExchangeB && selectedExchangeA !== selectedExchangeB) {
+                const symA = symbol.exchanges[selectedExchangeA];
+                const symB = symbol.exchanges[selectedExchangeB];
+                summaryEl.style.display = 'block';
+                summaryEl.innerHTML = `
+                    <div style="font-size: 0.8rem; color: var(--text-secondary);">套利对配置:</div>
+                    <div style="display: flex; align-items: center; gap: 10px; margin-top: 8px;">
+                        <div style="flex: 1; text-align: center;">
+                            <div style="font-size: 1.2rem;">${EXCHANGES[selectedExchangeA]?.icon || ''}</div>
+                            <div style="font-weight: bold;">${selectedExchangeA.toUpperCase()}</div>
+                            <div style="font-size: 0.75rem; color: var(--primary);">${symA}</div>
+                        </div>
+                        <div style="font-size: 1.5rem; color: var(--text-secondary);">⇄</div>
+                        <div style="flex: 1; text-align: center;">
+                            <div style="font-size: 1.2rem;">${EXCHANGES[selectedExchangeB]?.icon || ''}</div>
+                            <div style="font-weight: bold;">${selectedExchangeB.toUpperCase()}</div>
+                            <div style="font-size: 0.75rem; color: var(--primary);">${symB}</div>
+                        </div>
+                    </div>
+                `;
+            } else {
+                summaryEl.style.display = 'none';
+            }
+        }
+        
+        function renderExchangeSelector(containerId, symbol, side) {
+            const container = document.getElementById(containerId);
+            const supportedExchanges = Object.keys(symbol.exchanges);
+            
+            container.innerHTML = supportedExchanges.map(exId => {
+                const ex = EXCHANGES[exId];
+                if (!ex) return '';
+                const symbolOnEx = symbol.exchanges[exId];
+                const isSelected = exId === (side === 'A' ? selectedExchangeA : selectedExchangeB);
+                
+                return `
+                    <label class="exchange-option ${isSelected ? 'selected' : ''}" onclick="selectExchange('${side}', '${exId}')">
+                        <span class="exchange-icon">${ex.icon}</span>
+                        <div>
+                            <div class="exchange-name">${ex.name}</div>
+                            <div class="exchange-symbol">${symbolOnEx}</div>
+                        </div>
+                    </label>
+                `;
+            }).join('');
+        }
+        
+        function selectExchange(side, exchangeId) {
+            const symbolCode = document.getElementById('modalSymbol').value;
+            const symbol = SYMBOLS[symbolCode];
+            
+            if (side === 'A') {
+                selectedExchangeA = exchangeId;
+                // Ensure B is different
+                if (selectedExchangeB === exchangeId) {
+                    const others = Object.keys(symbol.exchanges).filter(e => e !== exchangeId);
+                    selectedExchangeB = others[0] || exchangeId;
+                }
+            } else {
+                selectedExchangeB = exchangeId;
+                // Ensure A is different
+                if (selectedExchangeA === exchangeId) {
+                    const others = Object.keys(symbol.exchanges).filter(e => e !== exchangeId);
+                    selectedExchangeA = others[0] || exchangeId;
+                }
+            }
+            
+            // Re-render
+            renderExchangeSelector('exchangeASelector', symbol, 'A');
+            renderExchangeSelector('exchangeBSelector', symbol, 'B');
+            
+            // Update summary
+            updatePairSummary();
+        }
+        
+        function createNewTask() {
+            const symbolCode = document.getElementById('modalSymbol').value;
+            const symbol = SYMBOLS[symbolCode];
+            
+            if (selectedExchangeA === selectedExchangeB) {
+                alert('Please select different exchanges for A and B');
+                return;
+            }
+            
+            const taskId = `${selectedExchangeA}-${selectedExchangeB}-${symbolCode.toLowerCase()}-${Date.now().toString(36)}`;
+            
+            const payload = {
+                task_id: taskId,
+                exchange_a: selectedExchangeA,
+                exchange_b: selectedExchangeB,
+                symbol: symbolCode,
+                symbol_a: symbol.exchanges[selectedExchangeA],
+                symbol_b: symbol.exchanges[selectedExchangeB],
+                config: {
+                    emaPeriod: parseInt(document.getElementById('modalEmaPeriod').value) || 20,
+                    firstSpread: parseFloat(document.getElementById('modalFirstSpread').value),
+                    nextSpread: parseFloat(document.getElementById('modalNextSpread').value),
+                    takeProfit: parseFloat(document.getElementById('modalTakeProfit').value),
+                    maxPos: parseInt(document.getElementById('modalMaxPos').value) || 3,
+                    tradeVolume: parseFloat(document.getElementById('modalTradeVol').value) || 0.01,
+                    dryRun: document.getElementById('modalDryRun').checked
+                },
+                autoStart: document.getElementById('modalAutoStart').checked
+            };
+            
+            console.log('Creating task:', payload);
+            
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'create_task', payload }));
+            }
+            
+            closeNewTaskModal();
+            
+            // Refresh after a short delay
+            setTimeout(refreshDashboard, 500);
+        }
+
+        // =================================================================
+        // Task Actions
+        // =================================================================
+        function startTask(taskId) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'start_task', payload: { task_id: taskId } }));
+            }
+            setTimeout(refreshDashboard, 500);
+        }
+        
+        function stopTask(taskId) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'stop_task', payload: { task_id: taskId } }));
+            }
+            setTimeout(refreshDashboard, 500);
+        }
+        
+        function removeTask(taskId) {
+            if (confirm(`Remove task "${taskId}"?`)) {
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: 'remove_task', payload: { task_id: taskId } }));
+                }
+                setTimeout(refreshDashboard, 500);
+            }
+        }
+
+        // =================================================================
+        // Settings
+        // =================================================================
+        function saveSettings() {
+            const settings = {
+                dryRun: document.getElementById('settingDryRun').value === 'true',
+                defaultVolume: parseFloat(document.getElementById('settingDefaultVolume').value)
+            };
+            
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'update_settings', payload: settings }));
+            }
+            
+            alert('Settings saved');
+        }
+
+        // =================================================================
+        // Navigation
+        // =================================================================
+        function showPage(pageId) {
+            document.querySelectorAll('.page').forEach(p => p.style.display = 'none');
+            document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+            
+            const page = document.getElementById(`page-${pageId}`);
+            if (page) {
+                page.style.display = 'block';
+            }
+            
+            // Update nav
+            document.querySelectorAll('.nav-item').forEach(n => {
+                if (n.onclick?.toString().includes(`'${pageId}'`)) {
+                    n.classList.add('active');
+                }
+            });
+            
+            // Render page-specific content
+            if (pageId === 'symbols') {
+                renderSymbolsPage();
+            } else if (pageId === 'tasks') {
+                updateAllTasksTable();
+            }
+        }
+
+        // =================================================================
+        // Initialize
+        // =================================================================
+        connect();
+        setInterval(refreshDashboard, 10000);
+    </script>
+</body>
+</html>

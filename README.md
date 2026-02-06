@@ -1,30 +1,86 @@
-# 跨交易所黄金价差套利机器人（初版）
+# 多交易所多品种价差套利系统 v2.0
 
-说明（中文）
+## 功能特性
 
-这个项目是一个初步的跨交易所价差套利示例：
-- 使用 MQL5 在 MT5 客户端输出 XAUUSD（现货黄金）价格到文件；
-- 使用 Python（ccxt + TA-Lib + MetaTrader5 Python API）来读取 MT5 输出、获取 OKX 上的 `XAU/USDT` 价格，计算价差并下套利单；
+- **多品种支持**：XAUUSD（黄金）、XAGUSD（白银）、BTCUSD、ETHUSD 等
+- **多交易所支持**：MT5、OKX、Binance、Bybit、Gate.io、Bitget、BitMart、LBank
+- **可视化管理台**：Web UI 创建/管理套利任务
+- **实时价差图表**：LightweightCharts 图表展示价差走势和 EMA
+- **EMA 价差策略**：基于 EMA 的自动开平仓策略
+- **Dry Run 模式**：模拟交易，不实际下单
 
-注意（重要）
-- 这是一个教学/原型实现，真实环境下需加入更严格的风控、手续费/slippage 处理、并发/持仓同步等；
-- 运行前需在本机安装并登录 MT5；Python 脚本通过官方 `MetaTrader5` 包连接本地 MT5；
-- OKX/API Key 请在 `config` 中填写（不应把密钥存入版本库）；
-- TA-Lib Python 绑定需要先安装系统级库（macOS: `brew install ta-lib`），然后 `pip install TA-Lib`；
+## 目录结构
 
-文件说明
-- `mql5/XAU_XAU_Arb.mq5` - MQL5 专家顾问（EA），会在每个 tick 写入当前 XAUUSD 价格到 `mt5_xau_price.json` 并轮询 `mt5_cmd.json` 执行简单指令；
-- `bot/arbitrage_bot.py` - Python 主程序，负责读取 MT5 的价格文件、通过 ccxt 获取 XAU/USDT 价格、计算价差并执行交易；
-- `requirements.txt` - Python 依赖列表；
+```
+spread_trading/
+├── src/                    # 新版模块化后端
+│   ├── config/             # 配置（settings.py, symbols.py）
+│   ├── models/             # 数据模型
+│   ├── gateway/            # 交易所网关（MT5, CCXT）
+│   ├── core/               # 核心逻辑（K线聚合, 策略）
+│   ├── services/           # 服务层（ArbitrageManager, OrderService）
+│   ├── server/             # WebSocket 服务器
+│   ├── web/                # Web 前端
+│   │   ├── admin.html      # 管理台页面
+│   │   └── index.html      # 图表页面
+│   └── main.py             # 入口
+├── bot/                    # 旧版后端（兼容保留）
+├── gateway/                # 旧版网关
+└── web/                    # 旧版前端
+```
 
-快速开始（简要）
-1. 在 MT5 终端中编译并加载 `XAU_XAU_Arb.mq5` 到图表，允许文件写入（Files）和 WebRequest（若需要）；
-2. 在系统上安装依赖：
-   - 安装系统库：`brew install ta-lib`（macOS）
-   - Python 包：`pip install -r requirements.txt`
-3. 编辑 `bot/arbitrage_bot.py` 中的 `CONFIG`：填入 OKX API Key/Secret、调整符号名称（MT5 的 XAUUSD 符号可能不同，例如 `XAUUSD`、`XAUUSDmicro` 等）；
-4. 运行 Python 程序：`python3 bot/arbitrage_bot.py`
+## 快速开始
 
-风险提示
-- 该示例未覆盖合约杠杆、保证金、跨平台结算、交易对手风险等；仅做学习演示用途。
-1229630844    w2386y6    7351028  DUx6*eYk
+### 1. 安装依赖
+
+```bash
+pip install -r requirements.txt
+```
+
+### 2. 启动后端
+
+```bash
+# 新版模块化后端
+python -m src.main
+
+# 或者旧版后端
+python bot/serve_ws_backend.py
+```
+
+### 3. 打开管理台
+
+浏览器访问 `http://localhost:8766` 或直接打开：
+- `src/web/admin.html` - 管理台
+- `src/web/index.html` - 图表页面
+
+### 4. 创建套利任务
+
+1. 点击 "New Arbitrage" 按钮
+2. 选择交易品种（如 XAUUSD）
+3. 选择两个交易所（如 MT5 和 OKX）
+4. 设置策略参数
+5. 点击 "Create Task" 开始套利
+
+## 品种符号映射
+
+| 品种 | MT5 | OKX | Binance | Bybit | Gate | Bitget |
+|------|-----|-----|---------|-------|------|--------|
+| 黄金 | XAUUSD | XAU/USDT:USDT | PAXG/USDT | XAUUSDT | PAXG_USDT | XAUUSDT |
+| 白银 | XAGUSD | XAG/USDT:USDT | - | XAGUSDT | - | XAGUSDT |
+| BTC | BTCUSD | BTC/USDT:USDT | BTC/USDT | BTCUSDT | BTC_USDT | BTCUSDT |
+| ETH | ETHUSD | ETH/USDT:USDT | ETH/USDT | ETHUSDT | ETH_USDT | ETHUSDT |
+
+## 策略参数说明
+
+- **EMA Period**: EMA 周期（默认 20）
+- **First Spread**: L1 入场价差阈值
+- **Next Spread**: L2+ 加仓价差阈值
+- **Take Profit**: 止盈价差阈值
+- **Max Positions**: 最大持仓层数
+- **Trade Volume**: 每次交易手数
+
+## 风险提示
+
+- 该系统仅供学习研究使用
+- 真实交易请充分测试并做好风控
+- 默认开启 Dry Run 模式，不会实际下单

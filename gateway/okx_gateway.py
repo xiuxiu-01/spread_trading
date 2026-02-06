@@ -69,14 +69,22 @@ class OKXGateway:
     def get_historical_data(self, start: datetime, end: datetime) -> list:
         """Fetch historical 1-minute OHLCV data from OKX with pagination."""
         try:
+            import calendar
+            
             # Ensure naive UTC timestamps
             if start.tzinfo:
                 start = start.astimezone(datetime.timezone.utc).replace(tzinfo=None)
             if end.tzinfo:
                 end = end.astimezone(datetime.timezone.utc).replace(tzinfo=None)
             
-            start_ts = int(start.timestamp() * 1000)
-            end_ts = int(end.timestamp() * 1000)
+            # Use calendar.timegm for UTC timestamps (not datetime.timestamp which uses local TZ)
+            start_ts = int(calendar.timegm(start.timetuple()) * 1000)
+            end_ts = int(calendar.timegm(end.timetuple()) * 1000)
+            
+            # OKX returns the current incomplete bar, so we need to exclude it
+            # Get current minute start timestamp
+            now_utc = datetime.utcnow()
+            current_bar_ts = int(calendar.timegm(now_utc.replace(second=0, microsecond=0).timetuple()) * 1000)
             
             all_data = []
             
@@ -96,6 +104,9 @@ class OKXGateway:
                     ts = entry[0]
                     # Filter out any data beyond end_time
                     if ts > end_ts:
+                        continue
+                    # Filter out the current incomplete bar
+                    if ts >= current_bar_ts:
                         continue
                         
                     all_data.append({

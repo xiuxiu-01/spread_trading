@@ -80,24 +80,88 @@ class MT5Gateway:
         return out
 
     def place_market_order(self, side: str, volume: float, deviation: int = 20, fill_mode: int = mt5.ORDER_FILLING_IOC):
+        """Place a market order. In Hedge mode, will close opposite positions first before opening new ones."""
         tick = mt5.symbol_info_tick(self.symbol)
         if tick is None:
             return None
-        price = float(tick.ask) if side == 'buy' else float(tick.bid)
-        order_type = mt5.ORDER_TYPE_BUY if side == 'buy' else mt5.ORDER_TYPE_SELL
-        request = {
-            'action': mt5.TRADE_ACTION_DEAL,
-            'symbol': self.symbol,
-            'volume': float(volume),
-            'type': order_type,
-            'price': price,
-            'deviation': deviation,
-            'magic': 234000,
-            'comment': 'gateway',
-            'type_filling': fill_mode,
-            'type_time': mt5.ORDER_TIME_GTC,
-        }
-        return mt5.order_send(request)
+        
+        # Check account mode: 2 = Hedge mode
+        account_info = mt5.account_info()
+        is_hedge_mode = account_info and account_info.margin_mode == 2
+        
+        remaining_volume = float(volume)
+        results = []
+        
+        if is_hedge_mode:
+            # In Hedge mode, first close opposite positions
+            positions = mt5.positions_get(symbol=self.symbol)
+            if positions:
+                # Determine opposite position type
+                # If we want to buy, close sells first; if we want to sell, close buys first
+                opposite_type = mt5.POSITION_TYPE_SELL if side == 'buy' else mt5.POSITION_TYPE_BUY
+                
+                for pos in positions:
+                    if pos.type == opposite_type and remaining_volume > 0:
+                        close_volume = min(pos.volume, remaining_volume)
+                        close_price = float(tick.ask) if side == 'buy' else float(tick.bid)
+                        
+                        # Close position by specifying position ticket
+                        close_request = {
+                            'action': mt5.TRADE_ACTION_DEAL,
+                            'symbol': self.symbol,
+                            'volume': close_volume,
+                            'type': mt5.ORDER_TYPE_BUY if side == 'buy' else mt5.ORDER_TYPE_SELL,
+                            'position': pos.ticket,  # Specify position to close
+                            'price': close_price,
+                            'deviation': deviation,
+                            'magic': 234000,
+                            'comment': 'gateway-close',
+                            'type_filling': fill_mode,
+                            'type_time': mt5.ORDER_TIME_GTC,
+                        }
+                        
+                        close_result = mt5.order_send(close_request)
+                        results.append(close_result)
+                        
+                        if close_result and close_result.retcode == 10009:
+                            print(f"[MT5] Closed position #{pos.ticket}: {close_volume} lots")
+                            remaining_volume -= close_volume
+                        else:
+                            error_code = close_result.retcode if close_result else 'None'
+                            error_comment = getattr(close_result, 'comment', 'N/A') if close_result else 'N/A'
+                            print(f"[MT5] Failed to close position #{pos.ticket}: retcode={error_code}, comment={error_comment}")
+        
+        # If there's remaining volume, open new position
+        if remaining_volume > 0.001:  # Avoid dust orders
+            price = float(tick.ask) if side == 'buy' else float(tick.bid)
+            order_type = mt5.ORDER_TYPE_BUY if side == 'buy' else mt5.ORDER_TYPE_SELL
+            request = {
+                'action': mt5.TRADE_ACTION_DEAL,
+                'symbol': self.symbol,
+                'volume': float(remaining_volume),
+                'type': order_type,
+                'price': price,
+                'deviation': deviation,
+                'magic': 234000,
+                'comment': 'gateway',
+                'type_filling': fill_mode,
+                'type_time': mt5.ORDER_TIME_GTC,
+            }
+            result = mt5.order_send(request)
+            results.append(result)
+            
+            if result and result.retcode == 10009:
+                print(f"[MT5] Opened new position: {side} {remaining_volume} lots")
+            else:
+                error_code = result.retcode if result else 'None'
+                error_comment = getattr(result, 'comment', 'N/A') if result else 'N/A'
+                print(f"[MT5] Failed to open position: retcode={error_code}, comment={error_comment}")
+        
+        # Return the last successful result, or last result if none succeeded
+        for r in reversed(results):
+            if r and hasattr(r, 'retcode') and r.retcode == 10009:
+                return r
+        return results[-1] if results else None
 
     def place_limit_order(self, side: str, volume: float, price: float, deviation: int = 20,
                            fill_mode: int = mt5.ORDER_FILLING_IOC,
@@ -252,18 +316,35 @@ class MT5Gateway:
         start_server = start_naive + offset_delta
         end_server = end_naive + offset_delta
 
-        rates = mt5.copy_rates_range(self.symbol, mt5.TIMEFRAME_M1, start_server, end_server)
+        # Calculate how many bars we need
+        minutes_diff = int((end_naive - start_naive).total_seconds() / 60)
+        bar_count = max(minutes_diff + 5, 20)  # Extra buffer for safety
         
-        if rates is None:
+        # Use copy_rates_from_pos to get recent bars (position 0 = current bar)
+        # This is more reliable than copy_rates_from for getting recent data
+        rates = mt5.copy_rates_from_pos(self.symbol, mt5.TIMEFRAME_M1, 0, bar_count)
+        
+        if rates is None or len(rates) == 0:
             # Not raising error, return empty list to be safe
             print(f"Warning: Failed to fetch MT5 historical data: {mt5.last_error()}")
             return []
+        
+        # Filter bars within our time range using calendar.timegm (UTC-aware)
+        import calendar
+        start_ts = calendar.timegm(start_server.timetuple())
+        end_ts = calendar.timegm(end_server.timetuple())
+        
+        filtered_rates = [r for r in rates if start_ts <= int(r['time']) < end_ts]
+        
+        if not filtered_rates:
+            # If no bars match exact filter, get bars closest to end_time
+            filtered_rates = [r for r in rates if int(r['time']) < end_ts][-bar_count:]
 
         out = []
         # Pre-calc offset in seconds for adjustment back to UTC
         offset_seconds = int(offset_hours * 3600)
 
-        for r in rates:
+        for r in filtered_rates:
             # r['time'] is Server Time (e.g. 12:00 for a 10:00 UTC bar).
             # We want to return UTC timestamp (10:00).
             server_ts = int(r['time'])
@@ -283,27 +364,33 @@ class MT5Gateway:
 
     def is_market_open(self) -> bool:
         """Check if the market (Forex/Metals) is currently open in UTC time."""
-        # Forex Market Hours (approximate):
-        # Opens: Sunday 22:00 UTC (Sydney open)
-        # Closes: Friday 22:00 UTC (New York close)
-        # However, many brokers close 21:00 or 22:00 UTC Friday and open 21:00 or 22:00 UTC Sunday.
-        # Safe strict window: Mon 00:00 UTC to Fri 21:00 UTC.
+        # IC Markets daily maintenance:
+        # Beijing 05:55 - 07:01 = UTC 21:55 - 23:01 (daily)
+        # Weekend: Friday UTC 22:00 close, Sunday UTC 23:01 open
         
-        # Checking current UTC time
         now = datetime.now(timezone.utc)
-        weekday = now.weekday() # Mon=0, Sun=6
+        weekday = now.weekday()  # Mon=0, Sun=6
         hour = now.hour
+        minute = now.minute
         
-        # Friday: Close after 21:00 UTC (buffer for market close)
-        if weekday == 4 and hour >= 21:
+        # Daily maintenance window: UTC 21:55 - 23:01 (Beijing 05:55 - 07:01)
+        if hour == 21 and minute >= 55:
             return False
-            
-        # Saturday: Closed
+        if hour == 22:
+            return False
+        if hour == 23 and minute < 1:
+            return False
+        
+        # Saturday: Closed all day
         if weekday == 5:
             return False
             
-        # Sunday: Closed before 22:00 UTC (buffer for market open)
-        if weekday == 6 and hour < 22:
+        # Sunday: Closed before 23:01 UTC (Beijing 07:01 Monday)
+        if weekday == 6:
+            return False
+        
+        # Friday after 22:00 UTC: Closed for weekend
+        if weekday == 4 and hour >= 22:
             return False
             
         return True

@@ -1,0 +1,1094 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Arbitrage Dashboard - Admin</title>
+    <style>
+        :root {
+            --bg-color: #0d1117;
+            --card-bg: #161b22;
+            --sidebar-bg: #0d1117;
+            --text-primary: #c9d1d9;
+            --text-secondary: #8b949e;
+            --accent: #58a6ff;
+            --border: #30363d;
+            --green: #238636;
+            --red: #da3633;
+            --yellow: #d29922;
+            --purple: #a371f7;
+        }
+        
+        * { 
+            box-sizing: border-box; 
+            margin: 0;
+            padding: 0;
+        }
+        
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+            min-height: 100vh;
+            display: flex;
+        }
+
+        /* Sidebar */
+        .sidebar {
+            width: 260px;
+            background: var(--sidebar-bg);
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            position: fixed;
+            height: 100vh;
+            left: 0;
+            top: 0;
+        }
+        
+        .sidebar-header {
+            padding: 20px;
+            border-bottom: 1px solid var(--border);
+        }
+        
+        .sidebar-header h1 {
+            font-size: 1.1rem;
+            color: var(--accent);
+            margin-bottom: 5px;
+        }
+        
+        .sidebar-header .version {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+        }
+        
+        .nav-section {
+            padding: 15px 0;
+            border-bottom: 1px solid var(--border);
+        }
+        
+        .nav-section-title {
+            padding: 0 20px 10px;
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: var(--text-secondary);
+        }
+        
+        .nav-item {
+            display: flex;
+            align-items: center;
+            padding: 10px 20px;
+            color: var(--text-secondary);
+            text-decoration: none;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        
+        .nav-item:hover {
+            background: rgba(88, 166, 255, 0.1);
+            color: var(--text-primary);
+        }
+        
+        .nav-item.active {
+            background: rgba(88, 166, 255, 0.15);
+            color: var(--accent);
+            border-left: 3px solid var(--accent);
+        }
+        
+        .nav-item .icon {
+            width: 20px;
+            margin-right: 12px;
+            text-align: center;
+        }
+        
+        .sidebar-footer {
+            margin-top: auto;
+            padding: 15px 20px;
+            border-top: 1px solid var(--border);
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+        }
+        
+        .connection-status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--red);
+        }
+        
+        .status-dot.connected {
+            background: var(--green);
+            box-shadow: 0 0 6px var(--green);
+        }
+
+        /* Main Content */
+        .main-content {
+            margin-left: 260px;
+            flex: 1;
+            padding: 20px 30px;
+            min-height: 100vh;
+        }
+        
+        .page-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 25px;
+        }
+        
+        .page-title {
+            font-size: 1.5rem;
+            font-weight: 600;
+        }
+        
+        .header-actions {
+            display: flex;
+            gap: 10px;
+        }
+
+        /* Stats Grid */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 25px;
+        }
+        
+        .stat-card {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 20px;
+        }
+        
+        .stat-label {
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+        }
+        
+        .stat-value {
+            font-size: 1.8rem;
+            font-weight: 600;
+            font-family: 'Monaco', 'Consolas', monospace;
+        }
+        
+        .stat-value.positive { color: var(--green); }
+        .stat-value.negative { color: var(--red); }
+        .stat-value.neutral { color: var(--accent); }
+        
+        .stat-change {
+            font-size: 0.75rem;
+            margin-top: 5px;
+        }
+
+        /* Task Table */
+        .table-container {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            overflow: hidden;
+            margin-bottom: 25px;
+        }
+        
+        .table-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 15px 20px;
+            border-bottom: 1px solid var(--border);
+        }
+        
+        .table-title {
+            font-size: 1rem;
+            font-weight: 600;
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        
+        th {
+            text-align: left;
+            padding: 12px 15px;
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--text-secondary);
+            background: rgba(0,0,0,0.2);
+            border-bottom: 1px solid var(--border);
+        }
+        
+        td {
+            padding: 15px;
+            border-bottom: 1px solid var(--border);
+            font-size: 0.9rem;
+        }
+        
+        tr:last-child td {
+            border-bottom: none;
+        }
+        
+        tr:hover {
+            background: rgba(88, 166, 255, 0.05);
+        }
+        
+        /* Status Badge */
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 0.75rem;
+            font-weight: 500;
+        }
+        
+        .status-badge.running {
+            background: rgba(35, 134, 54, 0.2);
+            color: var(--green);
+        }
+        
+        .status-badge.stopped {
+            background: rgba(139, 148, 158, 0.2);
+            color: var(--text-secondary);
+        }
+        
+        .status-badge.error {
+            background: rgba(218, 54, 51, 0.2);
+            color: var(--red);
+        }
+        
+        .status-badge.paused {
+            background: rgba(210, 153, 34, 0.2);
+            color: var(--yellow);
+        }
+        
+        .status-badge::before {
+            content: '';
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            margin-right: 6px;
+            background: currentColor;
+        }
+
+        /* Direction Badge */
+        .direction-badge {
+            display: inline-block;
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+        
+        .direction-badge.long {
+            background: rgba(35, 134, 54, 0.3);
+            color: var(--green);
+        }
+        
+        .direction-badge.short {
+            background: rgba(218, 54, 51, 0.3);
+            color: var(--red);
+        }
+        
+        .direction-badge.flat {
+            color: var(--text-secondary);
+        }
+
+        /* Buttons */
+        .btn {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.85rem;
+            font-weight: 500;
+            transition: all 0.2s;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+        
+        .btn-primary {
+            background: var(--accent);
+            color: white;
+        }
+        
+        .btn-primary:hover {
+            background: #4c9aed;
+        }
+        
+        .btn-success {
+            background: var(--green);
+            color: white;
+        }
+        
+        .btn-danger {
+            background: var(--red);
+            color: white;
+        }
+        
+        .btn-outline {
+            background: transparent;
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+        }
+        
+        .btn-outline:hover {
+            background: rgba(255,255,255,0.05);
+        }
+        
+        .btn-sm {
+            padding: 5px 10px;
+            font-size: 0.75rem;
+        }
+        
+        .btn-icon {
+            padding: 6px 8px;
+        }
+
+        /* Action Buttons */
+        .action-buttons {
+            display: flex;
+            gap: 5px;
+        }
+
+        /* Gateway Status */
+        .gateway-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 15px;
+        }
+        
+        .gateway-card {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 15px;
+        }
+        
+        .gateway-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+        
+        .gateway-name {
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .gateway-info {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+            font-size: 0.8rem;
+        }
+        
+        .gateway-info-item {
+            display: flex;
+            justify-content: space-between;
+        }
+        
+        .gateway-info-label {
+            color: var(--text-secondary);
+        }
+
+        /* Create Task Modal */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0,0,0,0.7);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+        }
+        
+        .modal-overlay.active {
+            display: flex;
+        }
+        
+        .modal {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            width: 100%;
+            max-width: 500px;
+            max-height: 80vh;
+            overflow-y: auto;
+        }
+        
+        .modal-header {
+            padding: 20px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .modal-title {
+            font-size: 1.1rem;
+            font-weight: 600;
+        }
+        
+        .modal-close {
+            background: none;
+            border: none;
+            color: var(--text-secondary);
+            font-size: 1.5rem;
+            cursor: pointer;
+        }
+        
+        .modal-body {
+            padding: 20px;
+        }
+        
+        .form-group {
+            margin-bottom: 15px;
+        }
+        
+        .form-label {
+            display: block;
+            margin-bottom: 6px;
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+        }
+        
+        .form-input, .form-select {
+            width: 100%;
+            padding: 10px 12px;
+            background: var(--bg-color);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            color: var(--text-primary);
+            font-size: 0.9rem;
+        }
+        
+        .form-input:focus, .form-select:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+        
+        .form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+        }
+        
+        .modal-footer {
+            padding: 15px 20px;
+            border-top: 1px solid var(--border);
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+        }
+
+        /* Live Spreads */
+        .spread-display {
+            display: flex;
+            gap: 20px;
+            font-family: 'Monaco', 'Consolas', monospace;
+        }
+        
+        .spread-item {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        
+        .spread-label {
+            font-size: 0.7rem;
+            color: var(--text-secondary);
+            margin-bottom: 3px;
+        }
+        
+        .spread-value {
+            font-size: 1rem;
+            font-weight: 600;
+        }
+        
+        .spread-value.positive { color: var(--green); }
+        .spread-value.negative { color: var(--red); }
+
+        /* Responsive */
+        @media (max-width: 1024px) {
+            .sidebar {
+                width: 60px;
+            }
+            
+            .sidebar-header h1,
+            .sidebar-header .version,
+            .nav-section-title,
+            .nav-item span,
+            .sidebar-footer span {
+                display: none;
+            }
+            
+            .nav-item .icon {
+                margin-right: 0;
+            }
+            
+            .main-content {
+                margin-left: 60px;
+            }
+        }
+        
+        @media (max-width: 768px) {
+            .sidebar {
+                display: none;
+            }
+            
+            .main-content {
+                margin-left: 0;
+            }
+            
+            .stats-grid {
+                grid-template-columns: 1fr 1fr;
+            }
+            
+            .form-row {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <!-- Sidebar -->
+    <nav class="sidebar">
+        <div class="sidebar-header">
+            <h1>🔄 Arbitrage</h1>
+            <span class="version">Dashboard v2.0</span>
+        </div>
+        
+        <div class="nav-section">
+            <div class="nav-section-title">Overview</div>
+            <a class="nav-item active" data-page="dashboard">
+                <span class="icon">📊</span>
+                <span>Dashboard</span>
+            </a>
+            <a class="nav-item" data-page="tasks">
+                <span class="icon">⚡</span>
+                <span>Tasks</span>
+            </a>
+            <a class="nav-item" data-page="gateways">
+                <span class="icon">🔌</span>
+                <span>Gateways</span>
+            </a>
+        </div>
+        
+        <div class="nav-section">
+            <div class="nav-section-title">Trading</div>
+            <a class="nav-item" href="index.html">
+                <span class="icon">📈</span>
+                <span>Charts</span>
+            </a>
+            <a class="nav-item" data-page="orders">
+                <span class="icon">📋</span>
+                <span>Orders</span>
+            </a>
+            <a class="nav-item" data-page="settings">
+                <span class="icon">⚙️</span>
+                <span>Settings</span>
+            </a>
+        </div>
+        
+        <div class="sidebar-footer">
+            <div class="connection-status">
+                <div class="status-dot" id="wsStatus"></div>
+                <span id="wsStatusText">Disconnected</span>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <main class="main-content">
+        <!-- Dashboard Page -->
+        <div id="page-dashboard" class="page active">
+            <div class="page-header">
+                <h2 class="page-title">Dashboard</h2>
+                <div class="header-actions">
+                    <button class="btn btn-outline" onclick="refreshDashboard()">
+                        🔄 Refresh
+                    </button>
+                    <button class="btn btn-primary" onclick="openCreateTaskModal()">
+                        ➕ New Task
+                    </button>
+                </div>
+            </div>
+            
+            <!-- Stats -->
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-label">Running Tasks</div>
+                    <div class="stat-value neutral" id="runningTasks">0</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Total PnL</div>
+                    <div class="stat-value" id="totalPnl">$0.00</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Total Trades</div>
+                    <div class="stat-value neutral" id="totalTrades">0</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Connected Gateways</div>
+                    <div class="stat-value neutral" id="connectedGateways">0</div>
+                </div>
+            </div>
+            
+            <!-- Tasks Table -->
+            <div class="table-container">
+                <div class="table-header">
+                    <h3 class="table-title">Arbitrage Tasks</h3>
+                </div>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Task ID</th>
+                            <th>Pair</th>
+                            <th>Status</th>
+                            <th>Spread (Sell/Buy)</th>
+                            <th>Position</th>
+                            <th>PnL</th>
+                            <th>Trades</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="tasksTable">
+                        <tr>
+                            <td colspan="8" style="text-align: center; color: var(--text-secondary);">
+                                No tasks configured. Click "New Task" to create one.
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            
+            <!-- Gateways Grid -->
+            <div class="table-container">
+                <div class="table-header">
+                    <h3 class="table-title">Gateway Status</h3>
+                </div>
+                <div class="gateway-grid" id="gatewayGrid" style="padding: 15px;">
+                    <div style="color: var(--text-secondary); text-align: center; padding: 20px;">
+                        No gateways connected
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- Create Task Modal -->
+    <div class="modal-overlay" id="createTaskModal">
+        <div class="modal">
+            <div class="modal-header">
+                <h3 class="modal-title">Create Arbitrage Task</h3>
+                <button class="modal-close" onclick="closeCreateTaskModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label class="form-label">Task ID</label>
+                    <input type="text" class="form-input" id="taskId" placeholder="e.g., mt5-okx-gold">
+                </div>
+                
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label">Exchange A</label>
+                        <select class="form-select" id="exchangeA">
+                            <option value="mt5">MT5</option>
+                            <option value="okx">OKX</option>
+                            <option value="binance">Binance</option>
+                            <option value="bybit">Bybit</option>
+                            <option value="gate">Gate.io</option>
+                            <option value="bitget">Bitget</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Symbol A</label>
+                        <input type="text" class="form-input" id="symbolA" placeholder="XAUUSD">
+                    </div>
+                </div>
+                
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label">Exchange B</label>
+                        <select class="form-select" id="exchangeB">
+                            <option value="okx">OKX</option>
+                            <option value="binance">Binance</option>
+                            <option value="bybit">Bybit</option>
+                            <option value="gate">Gate.io</option>
+                            <option value="bitget">Bitget</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Symbol B</label>
+                        <input type="text" class="form-input" id="symbolB" placeholder="XAU/USDT:USDT">
+                    </div>
+                </div>
+                
+                <hr style="border-color: var(--border); margin: 20px 0;">
+                
+                <h4 style="font-size: 0.9rem; margin-bottom: 15px;">Strategy Parameters</h4>
+                
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label">EMA Period</label>
+                        <input type="number" class="form-input" id="emaPeriod" value="20">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">First Spread</label>
+                        <input type="number" class="form-input" id="firstSpread" value="3.0" step="0.1">
+                    </div>
+                </div>
+                
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label">Next Spread</label>
+                        <input type="number" class="form-input" id="nextSpread" value="1.0" step="0.1">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Take Profit</label>
+                        <input type="number" class="form-input" id="takeProfit" value="0.5" step="0.1">
+                    </div>
+                </div>
+                
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label">Max Positions</label>
+                        <input type="number" class="form-input" id="maxPos" value="3" min="1" max="10">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Trade Volume</label>
+                        <input type="number" class="form-input" id="tradeVol" value="0.01" step="0.01">
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline" onclick="closeCreateTaskModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="createTask()">Create Task</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // WebSocket connection
+        let ws;
+        let reconnectTimer;
+        let dashboardData = {};
+        
+        function connect() {
+            const wsHost = window.location.host || 'localhost:8765';
+            const wsProtocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+            const wsUrl = `${wsProtocol}://${wsHost}/ws`;
+            
+            console.log('Connecting to', wsUrl);
+            
+            try {
+                ws = new WebSocket(wsUrl);
+            } catch (e) {
+                console.error('WebSocket error:', e);
+                scheduleReconnect();
+                return;
+            }
+            
+            ws.onopen = () => {
+                console.log('WebSocket connected');
+                updateConnectionStatus(true);
+                
+                // Request dashboard data
+                ws.send(JSON.stringify({ type: 'get_dashboard' }));
+                ws.send(JSON.stringify({ type: 'get_tasks' }));
+            };
+            
+            ws.onclose = () => {
+                console.log('WebSocket disconnected');
+                updateConnectionStatus(false);
+                scheduleReconnect();
+            };
+            
+            ws.onerror = (err) => {
+                console.error('WebSocket error:', err);
+            };
+            
+            ws.onmessage = (event) => {
+                try {
+                    const msg = JSON.parse(event.data);
+                    handleMessage(msg);
+                } catch (e) {
+                    console.error('Parse error:', e);
+                }
+            };
+        }
+        
+        function scheduleReconnect() {
+            if (reconnectTimer) return;
+            reconnectTimer = setTimeout(() => {
+                reconnectTimer = null;
+                connect();
+            }, 3000);
+        }
+        
+        function updateConnectionStatus(connected) {
+            const dot = document.getElementById('wsStatus');
+            const text = document.getElementById('wsStatusText');
+            
+            if (connected) {
+                dot.classList.add('connected');
+                text.textContent = 'Connected';
+            } else {
+                dot.classList.remove('connected');
+                text.textContent = 'Disconnected';
+            }
+        }
+        
+        function handleMessage(msg) {
+            if (msg.type === 'dashboard') {
+                updateDashboard(msg.payload);
+            } else if (msg.type === 'tasks') {
+                updateTasksTable(msg.payload);
+            } else if (msg.type === 'task_created') {
+                refreshDashboard();
+            } else if (msg.type === 'task_status') {
+                refreshDashboard();
+            } else if (msg.type === 'tick') {
+                updateLiveSpreads(msg.payload);
+            }
+        }
+        
+        function updateDashboard(data) {
+            dashboardData = data;
+            
+            // Update stats
+            document.getElementById('runningTasks').textContent = data.running_tasks || 0;
+            
+            const pnl = data.total_pnl || 0;
+            const pnlEl = document.getElementById('totalPnl');
+            pnlEl.textContent = `$${pnl.toFixed(2)}`;
+            pnlEl.className = 'stat-value ' + (pnl > 0 ? 'positive' : pnl < 0 ? 'negative' : 'neutral');
+            
+            document.getElementById('totalTrades').textContent = data.total_trades || 0;
+            
+            const connectedGateways = (data.gateways || []).filter(g => g.status === 'connected').length;
+            document.getElementById('connectedGateways').textContent = connectedGateways;
+            
+            // Update tasks table
+            if (data.tasks) {
+                updateTasksTable(data.tasks);
+            }
+            
+            // Update gateways
+            if (data.gateways) {
+                updateGatewayGrid(data.gateways);
+            }
+        }
+        
+        function updateTasksTable(tasks) {
+            const tbody = document.getElementById('tasksTable');
+            
+            if (!tasks || tasks.length === 0) {
+                tbody.innerHTML = `
+                    <tr>
+                        <td colspan="8" style="text-align: center; color: var(--text-secondary);">
+                            No tasks configured. Click "New Task" to create one.
+                        </td>
+                    </tr>
+                `;
+                return;
+            }
+            
+            tbody.innerHTML = tasks.map(task => `
+                <tr>
+                    <td><strong>${task.task_id || task.name}</strong></td>
+                    <td>${task.pair || `${task.exchange_a}/${task.exchange_b}`}</td>
+                    <td><span class="status-badge ${task.status}">${task.status}</span></td>
+                    <td>
+                        <div class="spread-display">
+                            <div class="spread-item">
+                                <span class="spread-label">Sell</span>
+                                <span class="spread-value">${(task.avg_spread_sell || 0).toFixed(2)}</span>
+                            </div>
+                            <div class="spread-item">
+                                <span class="spread-label">Buy</span>
+                                <span class="spread-value">${(task.avg_spread_buy || 0).toFixed(2)}</span>
+                            </div>
+                        </div>
+                    </td>
+                    <td>
+                        ${task.current_level > 0 
+                            ? `<span class="direction-badge ${task.direction}">L${task.current_level} ${task.direction.toUpperCase()}</span>`
+                            : '<span class="direction-badge flat">Flat</span>'
+                        }
+                    </td>
+                    <td class="${task.total_pnl > 0 ? 'positive' : task.total_pnl < 0 ? 'negative' : ''}">
+                        $${(task.total_pnl || 0).toFixed(2)}
+                    </td>
+                    <td>${task.total_trades || task.trades || 0}</td>
+                    <td>
+                        <div class="action-buttons">
+                            ${task.status === 'running' 
+                                ? `<button class="btn btn-sm btn-outline" onclick="stopTask('${task.task_id}')">⏹️ Stop</button>`
+                                : `<button class="btn btn-sm btn-success" onclick="startTask('${task.task_id}')">▶️ Start</button>`
+                            }
+                            <button class="btn btn-sm btn-danger btn-icon" onclick="removeTask('${task.task_id}')">🗑️</button>
+                        </div>
+                    </td>
+                </tr>
+            `).join('');
+        }
+        
+        function updateGatewayGrid(gateways) {
+            const grid = document.getElementById('gatewayGrid');
+            
+            if (!gateways || gateways.length === 0) {
+                grid.innerHTML = `
+                    <div style="color: var(--text-secondary); text-align: center; padding: 20px;">
+                        No gateways connected
+                    </div>
+                `;
+                return;
+            }
+            
+            grid.innerHTML = gateways.map(gw => `
+                <div class="gateway-card">
+                    <div class="gateway-header">
+                        <div class="gateway-name">
+                            <span class="status-dot ${gw.status === 'connected' ? 'connected' : ''}"></span>
+                            ${gw.name.toUpperCase()} - ${gw.symbol || 'N/A'}
+                        </div>
+                        <span class="status-badge ${gw.status}">${gw.status}</span>
+                    </div>
+                    <div class="gateway-info">
+                        <div class="gateway-info-item">
+                            <span class="gateway-info-label">Ticks:</span>
+                            <span>${gw.tick_count || 0}</span>
+                        </div>
+                        <div class="gateway-info-item">
+                            <span class="gateway-info-label">Errors:</span>
+                            <span>${gw.error_count || 0}</span>
+                        </div>
+                        <div class="gateway-info-item">
+                            <span class="gateway-info-label">Last Tick:</span>
+                            <span>${gw.last_tick_at ? new Date(gw.last_tick_at).toLocaleTimeString() : '-'}</span>
+                        </div>
+                        <div class="gateway-info-item">
+                            <span class="gateway-info-label">Task:</span>
+                            <span>${gw.task_id || '-'}</span>
+                        </div>
+                    </div>
+                </div>
+            `).join('');
+        }
+        
+        function updateLiveSpreads(tick) {
+            // Update live spread values in the table if tasks are running
+            // This would be called frequently for real-time updates
+        }
+        
+        function refreshDashboard() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'get_dashboard' }));
+            }
+        }
+        
+        // Task actions
+        function startTask(taskId) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ 
+                    type: 'start_task', 
+                    payload: { task_id: taskId } 
+                }));
+            }
+        }
+        
+        function stopTask(taskId) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ 
+                    type: 'stop_task', 
+                    payload: { task_id: taskId } 
+                }));
+            }
+        }
+        
+        function removeTask(taskId) {
+            if (confirm(`Remove task "${taskId}"?`)) {
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ 
+                        type: 'remove_task', 
+                        payload: { task_id: taskId } 
+                    }));
+                }
+            }
+        }
+        
+        // Modal functions
+        function openCreateTaskModal() {
+            document.getElementById('createTaskModal').classList.add('active');
+        }
+        
+        function closeCreateTaskModal() {
+            document.getElementById('createTaskModal').classList.remove('active');
+        }
+        
+        function createTask() {
+            const payload = {
+                task_id: document.getElementById('taskId').value || `task-${Date.now()}`,
+                exchange_a: document.getElementById('exchangeA').value,
+                exchange_b: document.getElementById('exchangeB').value,
+                symbol_a: document.getElementById('symbolA').value || 'XAUUSD',
+                symbol_b: document.getElementById('symbolB').value || 'XAU/USDT:USDT',
+                config: {
+                    emaPeriod: parseInt(document.getElementById('emaPeriod').value) || 20,
+                    firstSpread: parseFloat(document.getElementById('firstSpread').value) || 3.0,
+                    nextSpread: parseFloat(document.getElementById('nextSpread').value) || 1.0,
+                    takeProfit: parseFloat(document.getElementById('takeProfit').value) || 0.5,
+                    maxPos: parseInt(document.getElementById('maxPos').value) || 3,
+                    tradeVolume: parseFloat(document.getElementById('tradeVol').value) || 0.01,
+                }
+            };
+            
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ 
+                    type: 'create_task', 
+                    payload: payload 
+                }));
+            }
+            
+            closeCreateTaskModal();
+        }
+        
+        // Navigation
+        document.querySelectorAll('.nav-item[data-page]').forEach(item => {
+            item.addEventListener('click', () => {
+                // Update active nav
+                document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+                item.classList.add('active');
+                
+                // Show page (simplified - all content on dashboard for now)
+                const page = item.dataset.page;
+                console.log('Navigate to:', page);
+            });
+        });
+        
+        // Initialize
+        connect();
+        
+        // Refresh dashboard periodically
+        setInterval(refreshDashboard, 10000);
+    </script>
+</body>
+</html>

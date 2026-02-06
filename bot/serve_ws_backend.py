@@ -3,6 +3,8 @@ import sys
 import json
 import time
 import threading
+import gc
+from glob import glob
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
@@ -25,12 +27,18 @@ load_dotenv()
 DATA_DIR = os.path.join(ROOT, 'data')
 os.makedirs(DATA_DIR, exist_ok=True)
 HISTORY_FILE = os.path.join(DATA_DIR, 'history.jsonl')
+DAILY_LOG_DIR = os.path.join(DATA_DIR, 'daily_logs')
+os.makedirs(DAILY_LOG_DIR, exist_ok=True)
 
-EMA_PERIOD = int(os.getenv('EMA_PERIOD', '60'))
-FIRST_SPREAD = float(os.getenv('FIRST_SPREAD', '3.0'))
-NEXT_SPREAD = float(os.getenv('NEXT_SPREAD', '1.0'))
+EMA_PERIOD = int(os.getenv('EMA_PERIOD', '120'))
+FIRST_SPREAD = float(os.getenv('FIRST_SPREAD', '6.0'))
+NEXT_SPREAD = float(os.getenv('NEXT_SPREAD', '3.0'))
 TAKE_PROFIT = float(os.getenv('TAKE_PROFIT', '3.0'))
-MAX_POS = int(os.getenv('MAX_POS', '3'))
+MAX_POS = int(os.getenv('MAX_POS', '6'))
+
+# Memory limits to prevent infinite growth
+MAX_HISTORY_BARS = 10000  # ~7 days of 1-minute bars
+MAX_ORDERS = 500  # Maximum orders to keep in memory
 
 SYMBOL_OKX = os.getenv('OKX_SYMBOL', 'XAU/USDT:USDT')
 SYMBOL_MT5 = os.getenv('MT5_SYMBOL', 'XAU')
@@ -49,13 +57,110 @@ params = {
 }
 orders = [] # In-memory order history
 
-async def broadcast(msg):
-    # Debug log to trace broadcasting (skip tick messages to reduce noise)
-    msg_type = msg.get('type')
-    client_count = len(clients)
-    if client_count > 0 and msg_type != 'tick':
-        print(f"Broadcasting to {client_count} clients: {msg_type}")
+def trim_orders():
+    """Keep only the last MAX_ORDERS orders in memory."""
+    global orders
+    if len(orders) > MAX_ORDERS:
+        orders = orders[-MAX_ORDERS:]
+        print(f"[Memory] Trimmed orders to {MAX_ORDERS} records")
+
+
+def get_order_logs_with_pnl(limit: int = 50) -> dict:
+    """
+    Read order logs from daily log files and calculate PnL.
     
+    Returns:
+        dict with:
+            - orders: list of order records with individual PnL
+            - pnl: summary of PnL (mt5, okx, total)
+    """
+    all_orders = []
+    
+    # Find all order log files
+    log_pattern = os.path.join(DAILY_LOG_DIR, 'orders_*.jsonl')
+    log_files = sorted(glob(log_pattern), reverse=True)  # Most recent first
+    
+    # Read orders from files until we have enough
+    for log_file in log_files:
+        if len(all_orders) >= limit:
+            break
+        try:
+            with open(log_file, 'r', encoding='utf-8') as f:
+                file_orders = []
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            order = json.loads(line)
+                            file_orders.append(order)
+                        except json.JSONDecodeError:
+                            continue
+                # Reverse to get most recent first
+                file_orders.reverse()
+                all_orders.extend(file_orders)
+        except Exception as e:
+            print(f"[OrderLogs] Failed to read {log_file}: {e}")
+    
+    # Limit to requested number
+    all_orders = all_orders[:limit]
+    
+    # Calculate PnL for each order
+    total_mt5_pnl = 0.0
+    total_okx_pnl = 0.0
+    
+    for order in all_orders:
+        mt5_pnl = 0.0
+        okx_pnl = 0.0
+        
+        # Extract MT5 profit from result
+        mt5_result = order.get('mt5_result')
+        if isinstance(mt5_result, dict):
+            mt5_pnl = float(mt5_result.get('profit', 0) or 0)
+        
+        # Extract OKX PnL from result - look for fillPnl or pnl
+        okx_result = order.get('okx_result')
+        if isinstance(okx_result, dict):
+            # Check for fillPnl in info (from ccxt)
+            info = okx_result.get('info', {})
+            if isinstance(info, dict):
+                okx_pnl = float(info.get('fillPnl', 0) or 0)
+            # Also check direct pnl field
+            if okx_pnl == 0:
+                okx_pnl = float(okx_result.get('pnl', 0) or 0)
+        
+        order['mt5_pnl'] = mt5_pnl
+        order['okx_pnl'] = okx_pnl
+        
+        # Only count filled orders for PnL
+        if order.get('status') == 'filled_all':
+            total_mt5_pnl += mt5_pnl
+            total_okx_pnl += okx_pnl
+    
+    return {
+        'orders': all_orders,
+        'pnl': {
+            'mt5': total_mt5_pnl,
+            'okx': total_okx_pnl,
+            'total': total_mt5_pnl + total_okx_pnl,
+        }
+    }
+
+
+def get_memory_stats():
+    """Get memory usage statistics."""
+    try:
+        import psutil
+        process = psutil.Process(os.getpid())
+        mem = process.memory_info()
+        return {
+            'rss_mb': mem.rss / 1024 / 1024,
+            'vms_mb': mem.vms / 1024 / 1024,
+        }
+    except ImportError:
+        # psutil not available, use basic tracking
+        return {'objects': len(gc.get_objects())}
+
+async def broadcast(msg):
     dead = set()
     for ws in list(clients):
         try:
@@ -119,6 +224,19 @@ class Aggregator:
         # NEW: Two spread lines for active trading
         self.spread_sell = []  # MT5 bid - OKX ask (主动卖MT5买OKX)
         self.spread_buy = []   # MT5 ask - OKX bid (主动买MT5卖OKX)
+    
+    def trim_to_max(self):
+        """Trim all lists to MAX_HISTORY_BARS to prevent memory growth."""
+        if len(self.times) > MAX_HISTORY_BARS:
+            excess = len(self.times) - MAX_HISTORY_BARS
+            self.times = self.times[excess:]
+            self.mt5_stats = self.mt5_stats[excess:]
+            self.okx_stats = self.okx_stats[excess:]
+            self.spreads = self.spreads[excess:]
+            self.ema = self.ema[excess:]
+            self.spread_sell = self.spread_sell[excess:]
+            self.spread_buy = self.spread_buy[excess:]
+            print(f"[Memory] Trimmed history to {MAX_HISTORY_BARS} bars")
 
     def load_from_file(self):
         if not os.path.exists(HISTORY_FILE):
@@ -270,6 +388,7 @@ class Aggregator:
             self.spread_buy.append(spread)
         
         self.ema = compute_ema(self.spreads, self.ema_period)
+        self.trim_to_max()  # Limit memory usage
         self.rewrite_file()
 
     def get_history_payload(self):
@@ -451,6 +570,9 @@ class Aggregator:
                     'spread_buy': spread_buy,
                     'ema': ema_val,
                 }
+                
+                # Trim memory to prevent unbounded growth
+                self.trim_to_max()
             else:
                 # Log usage but don't emit incomplete bars
                 print(f"Skipping bar {ts_iso}: Missing data (MT5={c_mt5['close']:.2f}, OKX={c_okx['close']:.2f})")
@@ -533,10 +655,93 @@ class Feeder:
             'ts': None
         }
         self.last_signal_time = 0  # Prevent signal spam
+        
+        # Rolling spread window for trading signals (5 second average)
+        self.spread_history = []  # List of (timestamp, spread_sell, spread_buy, spread_mid)
+        self.spread_window_seconds = 5  # Rolling window size in seconds
+        
+        # Daily log file tracking
+        self.last_daily_log_minute = None
+        
+        # Thread-safe tick update flags
+        self._tick_updated = False
+        self._tick_lock = threading.Lock()
+
+    def _get_daily_log_path(self):
+        """Get daily log file path based on current date."""
+        today = datetime.now().strftime('%Y-%m-%d')
+        return os.path.join(DAILY_LOG_DIR, f'spread_data_{today}.jsonl')
+    
+    def _get_orders_log_path(self):
+        """Get daily orders log file path."""
+        today = datetime.now().strftime('%Y-%m-%d')
+        return os.path.join(DAILY_LOG_DIR, f'orders_{today}.jsonl')
+    
+    def _save_minute_data(self, data: dict):
+        """Save minute data to daily log file."""
+        try:
+            log_path = self._get_daily_log_path()
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(data, ensure_ascii=False) + '\n')
+        except Exception as e:
+            print(f"[DailyLog] Failed to save: {e}")
+    
+    def _save_order_log(self, order_record: dict, signal_info: dict = None):
+        """Save order to daily orders log file.
+        
+        Args:
+            order_record: The order execution result
+            signal_info: Optional signal trigger information
+        """
+        try:
+            log_path = self._get_orders_log_path()
+            
+            # 获取当前实时价格
+            mt5_bid = self.realtime_state.get('mt5_bid')
+            mt5_ask = self.realtime_state.get('mt5_ask')
+            okx_bid = self.realtime_state.get('okx_bid')
+            okx_ask = self.realtime_state.get('okx_ask')
+            
+            # 构建完整的订单日志
+            log_entry = {
+                'ts': order_record.get('ts'),
+                'order_id': order_record.get('id'),
+                'direction': order_record.get('direction'),
+                'level': order_record.get('level'),
+                'vol': order_record.get('vol'),
+                'status': order_record.get('status'),
+                # 实时价格
+                'prices': {
+                    'mt5_bid': mt5_bid,
+                    'mt5_ask': mt5_ask,
+                    'okx_bid': okx_bid,
+                    'okx_ask': okx_ask,
+                    'spread_sell': mt5_bid - okx_ask if mt5_bid and okx_ask else None,
+                    'spread_buy': mt5_ask - okx_bid if mt5_ask and okx_bid else None,
+                },
+                # EMA
+                'ema': self.agg.ema[-1] if self.agg.ema else None,
+                # 信号触发原因
+                'signal': signal_info,
+                # 执行结果
+                'mt5_result': order_record.get('mt5_res'),
+                'okx_result': order_record.get('okx_res'),
+                'error': order_record.get('error'),
+            }
+            
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(log_entry, ensure_ascii=False, default=str) + '\n')
+            
+            print(f"[OrderLog] Saved order to {log_path}")
+        except Exception as e:
+            print(f"[OrderLog] Failed to save: {e}")
 
     async def run_account_monitor(self):
         """Periodically fetch and broadcast account info."""
         print("Account Monitor started")
+        last_mt5_net = None
+        last_okx_net = None
+        memory_log_counter = 0
         while True:
             try:
                 # Fetch balance
@@ -548,7 +753,23 @@ class Feeder:
                 # okx_net is in oz, convert to lots for display (1 lot = 100 oz)
                 okx_net_lots = okx_net / 100.0
                 
-                print(f"[Account] MT5: {mt5_bal:.2f}, OKX: {okx_bal:.2f} | Net: MT5={mt5_net:.2f} lots, OKX={okx_net:.2f} oz ({okx_net_lots:.2f} lots)")
+                # Only log when position changes
+                if last_mt5_net != mt5_net or last_okx_net != okx_net:
+                    print(f"[Account] MT5: {mt5_bal:.2f}, OKX: {okx_bal:.2f} | Net: MT5={mt5_net:.2f} lots, OKX={okx_net:.2f} oz ({okx_net_lots:.2f} lots)")
+                    last_mt5_net = mt5_net
+                    last_okx_net = okx_net
+
+                # Log memory stats every 60 seconds (12 * 5sec = 60sec)
+                memory_log_counter += 1
+                if memory_log_counter >= 12:
+                    memory_log_counter = 0
+                    mem = get_memory_stats()
+                    gc.collect()  # Force garbage collection periodically
+                    bars = len(self.agg.times)
+                    order_cnt = len(orders)
+                    ws_clients = len(clients)
+                    spread_hist = len(self.spread_history)
+                    print(f"[Stats] Memory: {mem} | Bars: {bars} | Orders: {order_cnt} | WS Clients: {ws_clients} | SpreadHist: {spread_hist}")
 
                 new_state = {
                     'balance': {'mt5': mt5_bal, 'okx': okx_bal},
@@ -585,11 +806,12 @@ class Feeder:
             
         return mt5_net, okx_net, mt5_pos, okx_pos
 
-    def execute_trade(self, direction: str, level: int = 1):
+    def execute_trade(self, direction: str, level: int = 1, signal_info: dict = None):
         """
         Execute a spread trade with independent leg management to handle out-of-sync states.
         direction: 'long' (Buy Spread: Buy MT5, Sell OKX) or 'short' (Sell Spread: Sell MT5, Buy OKX)
         level: 1, 2, 3... determines sizing (size = level * base_vol) for accumulation
+        signal_info: Optional dict with signal trigger details (spread values, EMA, etc.)
         
         Order execution: OKX first, then MT5 (only if OKX succeeds)
         """
@@ -741,7 +963,8 @@ class Feeder:
                     if okx_res and isinstance(okx_res, dict):
                         if okx_res.get('id') or okx_res.get('status') == 'closed':
                             is_okx_success = True
-                            okx_executed_amt = float(okx_res.get('filled', amt_okx))
+                            filled_val = okx_res.get('filled')
+                            okx_executed_amt = float(filled_val) if filled_val is not None else amt_okx
                             print(f"[OKX SUCCESS] Filled: {okx_executed_amt}")
                         else:
                             print(f"[OKX] Response without clear success: {okx_res}")
@@ -783,8 +1006,13 @@ class Feeder:
                 
                 try:
                     mt5_res = self.mt5.place_market_order(action_mt5, vol_mt5)
+                    print(f"[MT5] Raw response: {mt5_res}, type: {type(mt5_res)}")
+                    if mt5_res and hasattr(mt5_res, 'retcode'):
+                        print(f"[MT5] Retcode: {mt5_res.retcode}, Comment: {getattr(mt5_res, 'comment', 'N/A')}")
                 except Exception as e:
                     print(f"MT5 Order Exception: {e}")
+                    import traceback
+                    traceback.print_exc()
                     mt5_res = None
 
                 if mt5_res and hasattr(mt5_res, 'retcode') and mt5_res.retcode == 10009:
@@ -808,7 +1036,7 @@ class Feeder:
                 
                 if not is_mt5_success:
                     order_record['status'] = 'failed_mt5_after_okx'
-                    order_record['error'] = 'OKX executed but MT5 failed! Manual intervention required!'
+                    order_record['error'] = 'OKX已成交但MT5失败！需要手动处理！'
                     orders.append(order_record)
                     return order_record
             else:
@@ -822,6 +1050,11 @@ class Feeder:
             order_record['error'] = str(e)
             
         orders.append(order_record)
+        trim_orders()
+        
+        # 保存订单到日志文件
+        self._save_order_log(order_record, signal_info)
+        
         return order_record
 
     def close_all(self):
@@ -856,7 +1089,7 @@ class Feeder:
         return results
 
     def start(self, loop):
-        # Real-time tick thread for MT5 (no market open check - always display bid/ask)
+        # Real-time tick thread for MT5 - directly updates shared state
         def mt5_tick_thread():
             print("MT5 Realtime Tick Thread started") 
             try:
@@ -864,14 +1097,15 @@ class Feeder:
                     bid = tick.get('bid')
                     ask = tick.get('ask')
                     if bid and ask:
-                        loop.call_soon_threadsafe(
-                            lambda b=bid, a=ask: asyncio.create_task(self.process_realtime_mt5(b, a))
-                        )
+                        with self._tick_lock:
+                            self.realtime_state['mt5_bid'] = float(bid)
+                            self.realtime_state['mt5_ask'] = float(ask)
+                            self._tick_updated = True
             except Exception as e:
                 print(f"MT5 Tick Thread error: {e}")
         threading.Thread(target=mt5_tick_thread, daemon=True).start()
 
-        # Real-time tick thread for OKX (no market open check - always display bid/ask)
+        # Real-time tick thread for OKX - directly updates shared state
         def okx_tick_thread():
             print("OKX Realtime Tick Thread started")
             while True:
@@ -882,9 +1116,10 @@ class Feeder:
                     if bids and asks:
                         best_bid = float(bids[0][0])
                         best_ask = float(asks[0][0])
-                        loop.call_soon_threadsafe(
-                            lambda b=best_bid, a=best_ask: asyncio.create_task(self.process_realtime_okx(b, a))
-                        )
+                        with self._tick_lock:
+                            self.realtime_state['okx_bid'] = best_bid
+                            self.realtime_state['okx_ask'] = best_ask
+                            self._tick_updated = True
                     time.sleep(0.3)  # Faster updates for real-time display
                 except Exception as e:
                     print(f"OKX Tick Thread error: {e}")
@@ -906,6 +1141,7 @@ class Feeder:
                     if seconds_to_wait > 0 and seconds_to_wait < 55:
                         time.sleep(seconds_to_wait)
                     
+                    print(f"[KLine Thread] Triggering fetch at {datetime.now(timezone.utc)}")
                     # Fetch last completed 1m bar
                     loop.call_soon_threadsafe(
                         lambda: asyncio.create_task(self.fetch_and_emit_kline())
@@ -918,21 +1154,26 @@ class Feeder:
                     time.sleep(10)
         threading.Thread(target=kline_fetch_thread, daemon=True).start()
 
-    async def process_realtime_mt5(self, bid, ask):
-        """Process MT5 tick for real-time display and strategy trigger."""
-        self.realtime_state['mt5_bid'] = float(bid)
-        self.realtime_state['mt5_ask'] = float(ask)
-        self.realtime_state['ts'] = datetime.now(timezone.utc).isoformat()
-        
-        await self._update_realtime_spread()
-    
-    async def process_realtime_okx(self, bid, ask):
-        """Process OKX tick for real-time display and strategy trigger."""
-        self.realtime_state['okx_bid'] = float(bid)
-        self.realtime_state['okx_ask'] = float(ask)
-        self.realtime_state['ts'] = datetime.now(timezone.utc).isoformat()
-        
-        await self._update_realtime_spread()
+    async def run_tick_processor(self):
+        """Single async task that periodically processes tick updates from threads."""
+        print("Tick Processor started (100ms interval)")
+        while True:
+            try:
+                # Check if we have new tick data
+                should_process = False
+                with self._tick_lock:
+                    if self._tick_updated:
+                        self._tick_updated = False
+                        should_process = True
+                
+                if should_process:
+                    self.realtime_state['ts'] = datetime.now(timezone.utc).isoformat()
+                    await self._update_realtime_spread()
+                
+                await asyncio.sleep(0.1)  # 100ms interval - good balance between responsiveness and efficiency
+            except Exception as e:
+                print(f"Tick Processor error: {e}")
+                await asyncio.sleep(1)
     
     async def _update_realtime_spread(self):
         """Calculate and broadcast real-time spread, check strategy signals."""
@@ -953,11 +1194,33 @@ class Feeder:
         self.realtime_state['spread_buy'] = spread_buy
         self.realtime_state['spread_mid'] = spread_mid
         
+        # Update rolling spread window
+        now_ts = time.time()
+        self.spread_history.append((now_ts, spread_sell, spread_buy, spread_mid))
+        # Remove old entries outside the window
+        cutoff = now_ts - self.spread_window_seconds
+        self.spread_history = [(t, ss, sb, sm) for t, ss, sb, sm in self.spread_history if t >= cutoff]
+        
+        # Calculate rolling averages
+        if self.spread_history:
+            avg_spread_sell = sum(ss for _, ss, _, _ in self.spread_history) / len(self.spread_history)
+            avg_spread_buy = sum(sb for _, _, sb, _ in self.spread_history) / len(self.spread_history)
+            avg_spread_mid = sum(sm for _, _, _, sm in self.spread_history) / len(self.spread_history)
+        else:
+            avg_spread_sell, avg_spread_buy, avg_spread_mid = spread_sell, spread_buy, spread_mid
+        
+        self.realtime_state['avg_spread_sell'] = avg_spread_sell
+        self.realtime_state['avg_spread_buy'] = avg_spread_buy
+        self.realtime_state['avg_spread_mid'] = avg_spread_mid
+        
         # Get current EMA from history
         ema = self.agg.ema[-1] if self.agg.ema else spread_mid
         self.realtime_state['ema'] = ema
         
-        # Broadcast tick data
+        # Calculate minute-level time for chart (floor to current minute)
+        minute_time = int(now_ts // 60) * 60
+        
+        # Broadcast tick data (include rolling averages)
         await broadcast({
             'type': 'tick',
             'payload': {
@@ -968,16 +1231,25 @@ class Feeder:
                 'spread_sell': spread_sell,
                 'spread_buy': spread_buy,
                 'spread_mid': spread_mid,
+                'avg_spread_sell': avg_spread_sell,
+                'avg_spread_buy': avg_spread_buy,
+                'avg_spread_mid': avg_spread_mid,
                 'ema': ema,
-                'ts': self.realtime_state['ts']
+                'ts': self.realtime_state['ts'],
+                'time': minute_time  # Minute-level time for chart series
             }
         })
         
-        # Real-time strategy check
-        await self._check_realtime_signal(spread_mid, ema)
+        # Real-time strategy check (use rolling averages for stability)
+        # spread_sell for short signals, spread_buy for long signals
+        await self._check_realtime_signal(avg_spread_sell, avg_spread_buy, ema)
     
-    async def _check_realtime_signal(self, spread, ema):
-        """Check for trading signals in real-time (tick-level trigger)."""
+    async def _check_realtime_signal(self, spread_sell, spread_buy, ema):
+        """Check for trading signals in real-time (tick-level trigger).
+        
+        spread_sell: MT5 bid - OKX ask (用于判断做空信号，因为做空时卖MT5买OKX)
+        spread_buy: MT5 ask - OKX bid (用于判断做多信号，因为做多时买MT5卖OKX)
+        """
         if not params.get('autoTrade', False):
             return
         
@@ -993,39 +1265,101 @@ class Feeder:
         first_spread = float(params['firstSpread'])
         next_spread = float(params['nextSpread'])
         max_pos = int(params.get('maxPos', 3))
+        base_vol = float(params.get('tradeVolume', 0.01))  # Base trade volume per level
+        
+        # Get current net position (MT5 net in lots)
+        try:
+            mt5_net, okx_net, _, _ = self.get_net_exposure()
+            # mt5_net: positive = long spread, negative = short spread
+            # Calculate current level based on base volume (e.g., 0.03 lots / 0.01 base = level 3)
+            current_pos_level = int(round(abs(mt5_net) / base_vol)) if base_vol > 0 else 0
+            current_direction = 'long' if mt5_net > 0.001 else ('short' if mt5_net < -0.001 else 'neutral')
+        except Exception as e:
+            print(f"[AutoTrade] Failed to get position: {e}")
+            return
         
         signal_action = None
         signal_level = 0
+        trigger_spread = None  # The spread value that triggered the signal
         
-        # Check for short signals (spread too high)
+        # Check for short signals (spread_sell too high)
+        # 做空spread = 卖MT5买OKX，所以用spread_sell (MT5 bid - OKX ask)
         for lvl in range(max_pos, 0, -1):
             upper = ema + first_spread + (lvl - 1) * next_spread
-            if spread > upper:
+            if spread_sell > upper:
                 signal_action = 'short'
                 signal_level = lvl
+                trigger_spread = spread_sell
                 break
         
-        # Check for long signals (spread too low)
+        # Check for long signals (spread_buy too low)
+        # 做多spread = 买MT5卖OKX，所以用spread_buy (MT5 ask - OKX bid)
         if not signal_action:
             for lvl in range(max_pos, 0, -1):
                 lower = ema - first_spread - (lvl - 1) * next_spread
-                if spread < lower:
+                if spread_buy < lower:
                     signal_action = 'long'
                     signal_level = lvl
+                    trigger_spread = spread_buy
                     break
         
+        # Only trade if we need to increase position in the signal direction
+        # Don't trigger if:
+        # 1. Already have position >= signal_level in the same direction
+        # 2. Same direction but lower level (pullback within same side)
+        # DO trigger if:
+        # 1. No position
+        # 2. Same direction and need to add (level increase)
+        # 3. Opposite direction signal - CLOSE and REVERSE
         if signal_action:
-            self.last_signal_time = now
-            print(f"[AutoTrade REALTIME] Triggering {signal_action} Level {signal_level} | Spread: {spread:.2f} vs EMA: {ema:.2f}")
+            should_trade = False
             
-            async def trade_task():
-                try:
-                    await asyncio.to_thread(self.execute_trade, signal_action, level=signal_level)
-                except Exception as e:
-                    print(f"AutoTrade execution error: {e}")
-                await broadcast({'type': 'orders', 'payload': orders})
+            if current_direction == 'neutral':
+                # No position, can trade
+                should_trade = True
+            elif current_direction == signal_action:
+                # Same direction - only trade if current level < signal level (adding position)
+                if current_pos_level < signal_level:
+                    should_trade = True
+                    print(f"[AutoTrade] Adding to {signal_action}: L{current_pos_level} -> L{signal_level}")
+                # else: Skip silently - already at sufficient level
+            else:
+                # Opposite direction - CLOSE current position and REVERSE
+                # e.g., Have short L2, signal is long L1 -> close short and open long
+                should_trade = True
+                print(f"[AutoTrade] REVERSING: {current_direction} L{current_pos_level} -> {signal_action} L{signal_level}")
             
-            asyncio.create_task(trade_task())
+            if should_trade:
+                self.last_signal_time = now
+                spread_type = 'sell' if signal_action == 'short' else 'buy'
+                log_msg = f"[AutoTrade] 触发 {signal_action.upper()} L{signal_level} | spread_{spread_type}: {trigger_spread:.2f} vs EMA: {ema:.2f}"
+                print(log_msg)
+                
+                # 构建信号信息用于订单日志
+                signal_info = {
+                    'trigger': 'auto',
+                    'action': signal_action,
+                    'level': signal_level,
+                    'spread_type': spread_type,
+                    'trigger_spread': round(trigger_spread, 2),
+                    'ema': round(ema, 2),
+                    'spread_sell': round(spread_sell, 2),
+                    'spread_buy': round(spread_buy, 2),
+                    'first_spread': first_spread,
+                    'next_spread': next_spread,
+                    'threshold': round(ema + first_spread + (signal_level - 1) * next_spread, 2) if signal_action == 'short' else round(ema - first_spread - (signal_level - 1) * next_spread, 2),
+                    'current_direction': current_direction,
+                    'current_level': current_pos_level,
+                }
+                
+                async def trade_task():
+                    try:
+                        await asyncio.to_thread(self.execute_trade, signal_action, level=signal_level, signal_info=signal_info)
+                    except Exception as e:
+                        print(f"AutoTrade execution error: {e}")
+                    await broadcast({'type': 'orders', 'payload': orders})
+                
+                asyncio.create_task(trade_task())
 
     async def fetch_and_emit_kline(self):
         """Fetch latest 1m K-line from both exchanges and emit bar."""
@@ -1034,6 +1368,8 @@ class Feeder:
             # Get bar from 2 minutes ago to ensure it's complete
             end_time = now.replace(second=0, microsecond=0)
             start_time = end_time - timedelta(minutes=2)
+            
+            print(f"[KLine] Fetching {start_time} to {end_time}")
             
             # Fetch MT5 K-line
             mt5_bars = await asyncio.to_thread(
@@ -1106,19 +1442,43 @@ class Feeder:
             new_ema = spread * k + last_ema * (1 - k)
             self.agg.ema.append(new_ema)
             
+            # Use 5s rolling average spread if available, else fall back to realtime
+            avg_spread_sell = self.realtime_state.get('avg_spread_sell', spread_sell)
+            avg_spread_buy = self.realtime_state.get('avg_spread_buy', spread_buy)
+            
             bar = {
                 'ts': bar_iso,
                 'mt5': c_mt5,
                 'okx': c_okx,
                 'spread': spread,
-                'spread_sell': spread_sell,
-                'spread_buy': spread_buy,
+                'spread_sell': avg_spread_sell,  # Use 5s average
+                'spread_buy': avg_spread_buy,    # Use 5s average
                 'ema': new_ema,
             }
             
             # Save and broadcast
             self.agg.save_bar(bar)
             decorated = self.agg._decorate_bar(bar)
+            
+            # Save to daily log file (每分钟保存一次)
+            current_minute = datetime.now().strftime('%Y-%m-%d %H:%M')
+            if self.last_daily_log_minute != current_minute:
+                self.last_daily_log_minute = current_minute
+                daily_data = {
+                    'ts': bar_iso,
+                    'local_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    'mt5_bid': mt5_bid,
+                    'mt5_ask': mt5_ask,
+                    'okx_bid': okx_bid,
+                    'okx_ask': okx_ask,
+                    'spread_sell': round(spread_sell, 2),
+                    'spread_buy': round(spread_buy, 2),
+                    'spread_mid': round(spread, 2),
+                    'ema': round(new_ema, 2),
+                    'mt5_close': c_mt5['close'],
+                    'okx_close': c_okx['close'],
+                }
+                self._save_minute_data(daily_data)
             
             print(f"[KLine] New bar: {bar_iso} | Spread: {spread:.2f} | EMA: {new_ema:.2f}")
             await broadcast({'type': 'bar', 'payload': decorated})
@@ -1224,13 +1584,15 @@ async def handler(ws, path):
                 
                 elif msg.get('type') == 'make_long':
                     if feeder:
-                        res = feeder.execute_trade('long', level=1) 
+                        signal_info = {'trigger': 'manual', 'action': 'long', 'level': 1}
+                        res = feeder.execute_trade('long', level=1, signal_info=signal_info) 
                         await broadcast({'type': 'orders', 'payload': orders})
                         
                 elif msg.get('type') == 'make_short':
                     print("Manual API Short Request")
                     if feeder:
-                        feeder.execute_trade('short', level=1)
+                        signal_info = {'trigger': 'manual', 'action': 'short', 'level': 1}
+                        feeder.execute_trade('short', level=1, signal_info=signal_info)
                         await broadcast({'type': 'orders', 'payload': orders})
 
                 elif msg.get('type') == 'close_all':
@@ -1247,6 +1609,11 @@ async def handler(ws, path):
                         # Build and send history
                         history = feeder.agg.get_history_payload()
                         await ws.send_json({ 'type': 'history', 'payload': history })
+                
+                elif msg.get('type') == 'get_order_logs':
+                    limit = msg.get('limit', 50)
+                    order_logs_data = get_order_logs_with_pnl(limit)
+                    await ws.send_json({ 'type': 'order_logs', 'payload': order_logs_data })
                         
             except Exception as e:
                 print('ws msg err', e)
@@ -1276,7 +1643,7 @@ async def http_backtest_results(request):
     return web.Response(status=404, text='Results not found')
 
 async def http_ws(request):
-    ws = web.WebSocketResponse()
+    ws = web.WebSocketResponse(heartbeat=30)  # 30s heartbeat to detect dead connections
     await ws.prepare(request)
     clients.add(ws)
 
@@ -1317,13 +1684,19 @@ async def http_ws(request):
                     
                     elif msg.get('type') == 'make_long':
                         if feeder:
-                            res = feeder.execute_trade('long', level=1)
+                            signal_info = {'trigger': 'manual', 'action': 'long', 'level': 1}
+                            res = feeder.execute_trade('long', level=1, signal_info=signal_info)
                             await broadcast({'type': 'orders', 'payload': orders})
+                            # Send trade result to client
+                            await ws.send_json({'type': 'trade_result', 'payload': res})
                             
                     elif msg.get('type') == 'make_short':
                         if feeder:
-                            res = feeder.execute_trade('short', level=1)
+                            signal_info = {'trigger': 'manual', 'action': 'short', 'level': 1}
+                            res = feeder.execute_trade('short', level=1, signal_info=signal_info)
                             await broadcast({'type': 'orders', 'payload': orders})
+                            # Send trade result to client
+                            await ws.send_json({'type': 'trade_result', 'payload': res})
 
                     elif msg.get('type') == 'close_all':
                         print("Manual HTTP WS Close All Request")
@@ -1339,6 +1712,11 @@ async def http_ws(request):
                             # Build and send history
                             history = feeder.agg.get_history_payload()
                             await ws.send_json({ 'type': 'history', 'payload': history })
+                    
+                    elif msg.get('type') == 'get_order_logs':
+                        limit = msg.get('limit', 50)
+                        order_logs_data = get_order_logs_with_pnl(limit)
+                        await ws.send_json({ 'type': 'order_logs', 'payload': order_logs_data })
 
                 except Exception as e:
                     print('http ws msg err', e)
@@ -1407,6 +1785,8 @@ async def main_async():
     asyncio.create_task(feeder.run_scheduler())
     
     asyncio.create_task(feeder.run_account_monitor())
+    
+    asyncio.create_task(feeder.run_tick_processor())
 
     app = web.Application()
     app.router.add_get('/', http_index)

@@ -23,6 +23,7 @@ dist/
 build/
 .next/
 out/
+data/
 
 # Logs
 *.log
@@ -45,3 +46,4 @@ Thumbs.db
 mt5_xau_price.json
 mt5_cmd.json
 ticks.jsonl
+data/

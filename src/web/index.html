@@ -1077,9 +1077,11 @@
             const isHttps = window.location.protocol === 'https:';
             const scheme = isHttps ? 'wss' : 'ws';
 
+            // 固定使用 8766 端口连接 WebSocket 服务器
+            const wsPort = 8766;
             const host = wsHostOverride
                 ? wsHostOverride
-                : (isFile ? 'localhost:8765' : window.location.host);
+                : (isFile ? 'localhost' : window.location.hostname) + ':' + wsPort;
 
             const url = wsOverride || `${scheme}://${host}/ws`;
             
