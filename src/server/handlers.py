@@ -7,7 +7,7 @@ from typing import Dict, Any, Callable, Awaitable, Optional
 from ..config import settings
 from ..config.logging_config import get_logger
 from ..config.symbols import get_all_symbols_info, get_exchanges_info
-from ..services import ArbitrageManager
+from ..services import ArbitrageManager, verify_task_exchanges, task_persistence
 from ..core import KLineAggregator
 
 logger = get_logger("server.handlers")
@@ -313,25 +313,98 @@ class MessageHandler:
         })
     
     async def _handle_create_task(self, websocket: Any, payload: Dict):
-        """Handle create task request."""
+        """
+        Handle create task request.
+        
+        Before creating a task:
+        1. Check if API keys exist for both exchanges in .env
+        2. Verify connection and fetch balance from both exchanges
+        3. Only create task if both exchanges are accessible
+        4. Persist task to disk
+        """
+        exchange_a = payload.get("exchange_a", "mt5")
+        exchange_b = payload.get("exchange_b", "okx")
+        symbol_a = payload.get("symbol_a", "XAUUSD")
+        symbol_b = payload.get("symbol_b", "XAU/USDT:USDT")
+        
+        logger.info(f"Creating task: {exchange_a}/{symbol_a} <-> {exchange_b}/{symbol_b}")
+        
+        # Step 1 & 2: Verify both exchanges (API keys + balance)
         try:
-            # Include symbol in config for reference
+            all_ok, verification_results = await verify_task_exchanges(
+                exchange_a, exchange_b, symbol_a, symbol_b
+            )
+            
+            if not all_ok:
+                # Build error message with details
+                errors = []
+                balances = {}
+                
+                for ex_name, result in verification_results.items():
+                    if not result.success:
+                        errors.append(f"{ex_name}: {result.error}")
+                    if result.balance:
+                        balances[ex_name] = result.balance
+                
+                error_msg = "Exchange verification failed:\n" + "\n".join(errors)
+                logger.error(error_msg)
+                
+                await self.send(websocket, {
+                    "type": "task_creation_failed",
+                    "payload": {
+                        "error": error_msg,
+                        "verification": {
+                            name: r.to_dict() for name, r in verification_results.items()
+                        }
+                    }
+                })
+                return
+            
+            # Log balances
+            for ex_name, result in verification_results.items():
+                if result.balance:
+                    logger.info(f"✅ {ex_name} balance: {result.balance}")
+        
+        except Exception as e:
+            logger.error(f"Verification error: {e}")
+            await self.send(websocket, {
+                "type": "task_creation_failed",
+                "payload": {"error": f"Verification failed: {str(e)}"}
+            })
+            return
+        
+        # Step 3: Create the task
+        try:
             config = payload.get("config", {})
             if "symbol" not in config and "symbol" in payload:
                 config["symbol"] = payload.get("symbol")
             
+            # Add verified balances to config
+            config["verified_balances"] = {
+                name: r.balance for name, r in verification_results.items()
+            }
+            
             task = await self.manager.create_task(
                 task_id=payload.get("task_id", ""),
-                exchange_a=payload.get("exchange_a", "mt5"),
-                exchange_b=payload.get("exchange_b", "okx"),
-                symbol_a=payload.get("symbol_a", "XAUUSD"),
-                symbol_b=payload.get("symbol_b", "XAU/USDT:USDT"),
+                exchange_a=exchange_a,
+                exchange_b=exchange_b,
+                symbol_a=symbol_a,
+                symbol_b=symbol_b,
                 config=config
             )
             
+            # Step 4: Persist to disk
+            task_persistence.add_task(task, self.manager.tasks)
+            logger.info(f"Task {task.task_id} created and persisted")
+            
             await self.send(websocket, {
                 "type": "task_created",
-                "payload": task.to_dict()
+                "payload": {
+                    **task.to_dict(),
+                    "verification": {
+                        name: r.to_dict() for name, r in verification_results.items()
+                    }
+                }
             })
             
             # Auto-start if requested
@@ -359,6 +432,8 @@ class MessageHandler:
         
         if task_id:
             await self.manager.remove_task(task_id)
+            # Also remove from persistence
+            task_persistence.save_tasks(self.manager.tasks)
         
         await self.send(websocket, {
             "type": "task_removed",

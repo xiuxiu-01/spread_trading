@@ -597,6 +597,7 @@
             <div class="page-header">
                 <h2 class="page-title" id="detailTaskTitle">Task Details</h2>
                 <div class="header-actions">
+                    <button class="btn btn-primary" id="btnOpenChart" onclick="openTaskChart()">📊 Open Chart</button>
                     <button class="btn btn-outline" id="btnToggleTask" onclick="toggleCurrentTask()">⏸️ Pause</button>
                     <button class="btn btn-danger" id="btnCloseTask" onclick="closeCurrentPosition()">Close Position</button>
                 </div>
@@ -653,40 +654,28 @@
             <div class="modal-body">
                 <!-- Step 1: Select Symbol -->
                 <div class="form-group">
-                    <label class="form-label">1. Select Trading Pair</label>
+                    <label class="form-label">Select Symbol</label>
                     <select class="form-select" id="modalSymbol" onchange="onSymbolChange()">
                         <option value="XAUUSD">🥇 Gold (XAU/USD)</option>
                         <option value="XAGUSD">🥈 Silver (XAG/USD)</option>
+                        <option value="BTCUSD">₿ Bitcoin (BTC/USD)</option>
+                        <option value="ETHUSD">Ξ Ethereum (ETH/USD)</option>
                     </select>
-                </div>
-                
-                <!-- Symbol Info -->
-                <div id="symbolInfo" class="symbol-info" style="background: var(--card-bg); border-radius: 8px; padding: 12px; margin-bottom: 15px;">
-                    <!-- Populated by JS -->
                 </div>
                 
                 <!-- Step 2: Select Exchanges -->
                 <div class="form-group">
-                    <label class="form-label">2. Select Exchange Pair (套利双边)</label>
-                    <div style="display: flex; gap: 15px; margin-top: 10px;">
-                        <div style="flex: 1;">
-                            <div style="font-size: 0.75rem; color: var(--text-secondary); margin-bottom: 8px;">Exchange A (买入端)</div>
-                            <div class="exchange-selector" id="exchangeASelector">
-                                <!-- Will be populated by JS -->
-                            </div>
-                        </div>
-                        <div style="display: flex; align-items: center; font-size: 1.5rem; color: var(--text-secondary);">↔</div>
-                        <div style="flex: 1;">
-                            <div style="font-size: 0.75rem; color: var(--text-secondary); margin-bottom: 8px;">Exchange B (卖出端)</div>
-                            <div class="exchange-selector" id="exchangeBSelector">
-                                <!-- Will be populated by JS -->
-                            </div>
-                        </div>
+                    <label class="form-label">Select Exchange A (Source)</label>
+                    <div class="exchange-selector" id="exchangeASelector">
+                        <!-- Will be populated by JS -->
                     </div>
                 </div>
                 
-                <!-- Selected pair summary -->
-                <div id="pairSummary" style="background: var(--bg-secondary); border-radius: 8px; padding: 12px; margin-bottom: 15px; display: none;">
+                <div class="form-group">
+                    <label class="form-label">Select Exchange B (Target)</label>
+                    <div class="exchange-selector" id="exchangeBSelector">
+                        <!-- Will be populated by JS -->
+                    </div>
                 </div>
                 
                 <hr style="border-color: var(--border); margin: 20px 0;">
@@ -751,7 +740,9 @@
     <script>
         // =================================================================
         // Configuration Data (symbol mappings for each exchange)
+        // 已验证: 2026-02-06 通过 ccxt API 确认
         // =================================================================
+        // Verified 2026-02-06: All contracts tested for orderbook + 1m kline data
         const SYMBOLS = {
             XAUUSD: {
                 name: "Gold (XAU/USD)",
@@ -759,11 +750,13 @@
                 icon: "🥇",
                 exchanges: {
                     mt5: "XAUUSD",
-                    okx: "XAU/USDT:USDT",
-                    binance: "PAXG/USDT",
-                    bybit: "XAUUSDT",
-                    gate: "PAXG_USDT",
-                    bitget: "XAUUSDT"
+                    okx: "XAU/USDT:USDT",      // ✅ OKX swap ~4893
+                    binance: "XAU/USDT:USDT",  // ✅ Binance swap ~4914
+                    bybit: "PAXG/USDT:USDT",   // ✅ Bybit PAXG ~4915
+                    gate: "XAU/USDT:USDT",     // ✅ Gate swap ~4918
+                    bitget: "XAU/USDT:USDT",   // ✅ Bitget swap ~4916
+                    bitmart: "XAU/USDT:USDT"   // ✅ BitMart swap ~4917
+                    // LBank ❌ K线数据不可用
                 },
                 defaultParams: { firstSpread: 3.0, nextSpread: 1.0, takeProfit: 0.5, lotSize: 0.01 }
             },
@@ -773,9 +766,13 @@
                 icon: "🥈",
                 exchanges: {
                     mt5: "XAGUSD",
-                    okx: "XAG/USDT:USDT",
-                    bybit: "XAGUSDT",
-                    bitget: "XAGUSDT"
+                    okx: "XAG/USDT:USDT",      // ✅ OKX swap ~76.18
+                    binance: "XAG/USDT:USDT",  // ✅ Binance swap ~76.19
+                    gate: "XAG/USDT:USDT",     // ✅ Gate swap ~76.20
+                    bitget: "XAG/USDT:USDT",   // ✅ Bitget swap ~76.20
+                    bitmart: "XAG/USDT:USDT"   // ✅ BitMart swap ~76.17
+                    // Bybit ❌ 没有 XAG 合约
+                    // LBank ❌ K线数据不可用
                 },
                 defaultParams: { firstSpread: 0.15, nextSpread: 0.05, takeProfit: 0.03, lotSize: 0.5 }
             },
@@ -785,11 +782,11 @@
                 icon: "₿",
                 exchanges: {
                     mt5: "BTCUSD",
-                    okx: "BTC/USDT:USDT",
-                    binance: "BTC/USDT",
-                    bybit: "BTCUSDT",
-                    gate: "BTC_USDT",
-                    bitget: "BTCUSDT",
+                    okx: "BTC/USDT:USDT",      // ✅ OKX swap
+                    binance: "BTC/USDT",       // ✅ Binance spot
+                    bybit: "BTC/USDT:USDT",    // ✅ Bybit swap
+                    gate: "BTC/USDT",          // ✅ Gate spot
+                    bitget: "BTC/USDT:USDT",   // ✅ Bitget swap
                     bitmart: "BTC_USDT",
                     lbank: "btc_usdt"
                 },
@@ -801,11 +798,11 @@
                 icon: "Ξ",
                 exchanges: {
                     mt5: "ETHUSD",
-                    okx: "ETH/USDT:USDT",
-                    binance: "ETH/USDT",
-                    bybit: "ETHUSDT",
-                    gate: "ETH_USDT",
-                    bitget: "ETHUSDT",
+                    okx: "ETH/USDT:USDT",      // ✅ OKX swap
+                    binance: "ETH/USDT",       // ✅ Binance spot
+                    bybit: "ETH/USDT:USDT",    // ✅ Bybit swap
+                    gate: "ETH/USDT",          // ✅ Gate spot
+                    bitget: "ETH/USDT:USDT",   // ✅ Bitget swap
                     bitmart: "ETH_USDT",
                     lbank: "eth_usdt"
                 },
@@ -894,12 +891,16 @@
                 tasks = msg.payload || [];
                 updateTasksTable();
                 updateAllTasksTable();
-            } else if (msg.type === 'task_created' || msg.type === 'task_status') {
+            } else if (msg.type === 'task_created') {
+                handleTaskCreated(msg.payload);
+            } else if (msg.type === 'task_creation_failed') {
+                handleTaskCreationFailed(msg.payload);
+            } else if (msg.type === 'task_status') {
                 refreshDashboard();
             } else if (msg.type === 'tick') {
                 updateLiveTick(msg.payload);
             } else if (msg.type === 'error') {
-                alert(`Error: ${msg.message}`);
+                alert(`Error: ${msg.payload?.message || msg.message}`);
             }
         }
 
@@ -935,8 +936,8 @@
             }
             
             tbody.innerHTML = tasks.map(task => `
-                <tr onclick="showTaskDetail('${task.task_id}')" style="cursor: pointer;">
-                    <td><strong>${task.task_id}</strong></td>
+                <tr style="cursor: pointer;">
+                    <td><a href="index.html?task=${task.task_id}&symbol=${task.symbol}&exA=${task.exchange_a}&exB=${task.exchange_b}&symA=${encodeURIComponent(task.symbol_a || '')}&symB=${encodeURIComponent(task.symbol_b || '')}" style="color: var(--accent); text-decoration: none;"><strong>${task.task_id}</strong></a></td>
                     <td>${SYMBOLS[task.symbol]?.icon || ''} ${task.symbol || task.symbol_a}</td>
                     <td>
                         <span style="color: ${EXCHANGES[task.exchange_a]?.color || '#fff'}">${(task.exchange_a || '').toUpperCase()}</span>
@@ -1045,12 +1046,6 @@
             const task = tasks.find(t => t.task_id === taskId);
             if (!task) return;
             
-            // 跳转到 index.html 并传递任务 ID
-            const url = `index.html?task=${encodeURIComponent(taskId)}`;
-            window.location.href = url;
-            return;
-            
-            // 下面的代码暂时保留但不执行
             currentDetailTaskId = taskId;
             document.getElementById('detailTaskTitle').textContent = `${SYMBOLS[task.symbol]?.icon || ''} ${task.symbol} - ${task.task_id}`;
             
@@ -1144,6 +1139,24 @@
                 }
             }
         }
+        
+        function openTaskChart() {
+            if (!currentDetailTaskId) return;
+            const task = tasks.find(t => t.task_id === currentDetailTaskId);
+            if (!task) return;
+            
+            // Build URL with task parameters
+            const params = new URLSearchParams({
+                task: task.task_id,
+                symbol: task.symbol,
+                exA: task.exchange_a,
+                exB: task.exchange_b,
+                symA: task.symbol_a || '',
+                symB: task.symbol_b || ''
+            });
+            
+            window.open(`index.html?${params.toString()}`, '_blank');
+        }
 
         // =================================================================
         // New Task Modal
@@ -1176,21 +1189,8 @@
             document.getElementById('modalTakeProfit').value = symbol.defaultParams.takeProfit;
             document.getElementById('modalTradeVol').value = symbol.defaultParams.lotSize;
             
-            // 显示品种信息
-            const infoEl = document.getElementById('symbolInfo');
-            const supportedExchanges = Object.keys(symbol.exchanges);
-            infoEl.innerHTML = `
-                <div style="font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 8px;">该品种在以下交易所可交易:</div>
-                <div style="display: flex; flex-wrap: wrap; gap: 6px;">
-                    ${supportedExchanges.map(ex => `
-                        <span style="background: ${EXCHANGES[ex]?.color || '#666'}22; color: ${EXCHANGES[ex]?.color || '#fff'}; padding: 4px 8px; border-radius: 4px; font-size: 0.75rem;">
-                            ${EXCHANGES[ex]?.icon || ''} ${ex.toUpperCase()}: ${symbol.exchanges[ex]}
-                        </span>
-                    `).join('')}
-                </div>
-            `;
-            
             // Ensure selected exchanges are valid for this symbol
+            const supportedExchanges = Object.keys(symbol.exchanges);
             if (!supportedExchanges.includes(selectedExchangeA)) {
                 selectedExchangeA = supportedExchanges[0];
             }
@@ -1201,40 +1201,6 @@
             // Render exchange selectors
             renderExchangeSelector('exchangeASelector', symbol, 'A');
             renderExchangeSelector('exchangeBSelector', symbol, 'B');
-            
-            // Update pair summary
-            updatePairSummary();
-        }
-        
-        function updatePairSummary() {
-            const symbolCode = document.getElementById('modalSymbol').value;
-            const symbol = SYMBOLS[symbolCode];
-            if (!symbol) return;
-            
-            const summaryEl = document.getElementById('pairSummary');
-            if (selectedExchangeA && selectedExchangeB && selectedExchangeA !== selectedExchangeB) {
-                const symA = symbol.exchanges[selectedExchangeA];
-                const symB = symbol.exchanges[selectedExchangeB];
-                summaryEl.style.display = 'block';
-                summaryEl.innerHTML = `
-                    <div style="font-size: 0.8rem; color: var(--text-secondary);">套利对配置:</div>
-                    <div style="display: flex; align-items: center; gap: 10px; margin-top: 8px;">
-                        <div style="flex: 1; text-align: center;">
-                            <div style="font-size: 1.2rem;">${EXCHANGES[selectedExchangeA]?.icon || ''}</div>
-                            <div style="font-weight: bold;">${selectedExchangeA.toUpperCase()}</div>
-                            <div style="font-size: 0.75rem; color: var(--primary);">${symA}</div>
-                        </div>
-                        <div style="font-size: 1.5rem; color: var(--text-secondary);">⇄</div>
-                        <div style="flex: 1; text-align: center;">
-                            <div style="font-size: 1.2rem;">${EXCHANGES[selectedExchangeB]?.icon || ''}</div>
-                            <div style="font-weight: bold;">${selectedExchangeB.toUpperCase()}</div>
-                            <div style="font-size: 0.75rem; color: var(--primary);">${symB}</div>
-                        </div>
-                    </div>
-                `;
-            } else {
-                summaryEl.style.display = 'none';
-            }
         }
         
         function renderExchangeSelector(containerId, symbol, side) {
@@ -1282,9 +1248,6 @@
             // Re-render
             renderExchangeSelector('exchangeASelector', symbol, 'A');
             renderExchangeSelector('exchangeBSelector', symbol, 'B');
-            
-            // Update summary
-            updatePairSummary();
         }
         
         function createNewTask() {
@@ -1319,14 +1282,76 @@
             
             console.log('Creating task:', payload);
             
+            // Show loading state
+            const createBtn = document.querySelector('#newTaskModal .btn-success');
+            const originalText = createBtn.textContent;
+            createBtn.textContent = '⏳ Verifying...';
+            createBtn.disabled = true;
+            
             if (ws && ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({ type: 'create_task', payload }));
             }
             
+            // Re-enable button after timeout (in case of no response)
+            setTimeout(() => {
+                createBtn.textContent = originalText;
+                createBtn.disabled = false;
+            }, 10000);
+        }
+        
+        function handleTaskCreated(data) {
+            // Task created successfully
             closeNewTaskModal();
             
-            // Refresh after a short delay
+            // Re-enable button
+            const createBtn = document.querySelector('#newTaskModal .btn-success');
+            if (createBtn) {
+                createBtn.textContent = '✅ Create Task';
+                createBtn.disabled = false;
+            }
+            
+            // Show success with balance info
+            let msg = `✅ Task "${data.task_id}" created successfully!\n\n`;
+            if (data.verification) {
+                msg += "Exchange Balances:\n";
+                for (const [exName, v] of Object.entries(data.verification)) {
+                    if (v.balance) {
+                        msg += `  ${exName.toUpperCase()}: $${v.balance.USDT_total?.toFixed(2) || v.balance.USDT || '?'}\n`;
+                    }
+                }
+            }
+            
+            alert(msg);
             setTimeout(refreshDashboard, 500);
+        }
+        
+        function handleTaskCreationFailed(data) {
+            // Task creation failed - show detailed error
+            closeNewTaskModal();
+            
+            // Re-enable button
+            const createBtn = document.querySelector('#newTaskModal .btn-success');
+            if (createBtn) {
+                createBtn.textContent = '✅ Create Task';
+                createBtn.disabled = false;
+            }
+            
+            let msg = `❌ Task creation failed!\n\n${data.error}\n`;
+            
+            if (data.verification) {
+                msg += "\nDetails:\n";
+                for (const [exName, v] of Object.entries(data.verification)) {
+                    const status = v.success ? '✅' : '❌';
+                    msg += `  ${status} ${exName.toUpperCase()}: `;
+                    if (v.success) {
+                        msg += `OK (Balance: $${v.balance?.USDT_total?.toFixed(2) || '?'})\n`;
+                    } else {
+                        msg += `${v.error}\n`;
+                    }
+                }
+            }
+            
+            alert(msg);
         }
 
         // =================================================================

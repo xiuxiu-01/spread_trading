@@ -11,6 +11,7 @@ from ..gateway import BaseGateway, MT5Gateway, CCXTGateway
 from ..core import KLineAggregator, EMASpreadStrategy, SignalType
 from ..config import settings
 from ..config.logging_config import get_logger
+from .task_persistence import task_persistence
 
 logger = get_logger("services.arbitrage_manager")
 
@@ -51,6 +52,23 @@ class ArbitrageManager:
         self._on_bar: Optional[Callable[[str, Dict], Awaitable[None]]] = None
         self._on_trade: Optional[Callable[[str, Dict], Awaitable[None]]] = None
         self._on_status: Optional[Callable[[str, ArbitrageTask], Awaitable[None]]] = None
+        
+        # Load persisted tasks
+        self._load_persisted_tasks()
+    
+    def _load_persisted_tasks(self):
+        """Load tasks from disk on startup."""
+        try:
+            task_data_list = task_persistence.load_tasks()
+            for task_data in task_data_list:
+                task = task_persistence.create_task_from_dict(task_data)
+                self.tasks[task.task_id] = task
+                logger.info(f"Loaded persisted task: {task.task_id}")
+            
+            if task_data_list:
+                logger.info(f"Loaded {len(task_data_list)} tasks from disk")
+        except Exception as e:
+            logger.error(f"Failed to load persisted tasks: {e}")
     
     # --- Task Management ---
     

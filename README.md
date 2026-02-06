@@ -47,6 +47,11 @@ python -m src.main
 python bot/serve_ws_backend.py
 ```
 
+
+Get-NetTCPConnection -LocalPort 8766 -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }; Start-Sleep 2; cd c:\Users\Administrator\Desktop\workspace\spread_trading; python -m src.main
+cd c:\Users\Administrator\Desktop\workspace\spread_trading\src\web
+python -m http.server 8080
+
 ### 3. 打开管理台
 
 浏览器访问 `http://localhost:8766` 或直接打开：

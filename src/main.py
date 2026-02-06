@@ -70,11 +70,12 @@ class SpreadTradingApp:
         async def on_message(websocket, data):
             await self.handler.handle(websocket, data)
             
-        async def on_connect(websocket, path):
+        async def on_connect(websocket):
             # Send initial state to new clients
             await self.handler.send_initial_state(websocket)
         
         self.server.message_handler = on_message
+        self.server.connect_handler = on_connect
         
         # Register manager callbacks
         self.manager.on_tick(self._on_tick)

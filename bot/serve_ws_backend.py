@@ -1526,7 +1526,8 @@ class Feeder:
              return 
              
          start_time = last_ts + timedelta(minutes=1)
-         end_time = datetime.now(timezone.utc)
+         # Compare with naive local time
+         end_time = datetime.now()
          
          if start_time >= end_time:
              print("Data is up to date.")
@@ -1739,13 +1740,15 @@ async def main_async():
     
     if last_file_ts:
         start_time = last_file_ts + timedelta(minutes=1)
-        if start_time > datetime.now(timezone.utc):
+        # Compare with naive local time
+        now_naive = datetime.now()
+        if start_time > now_naive:
             print("Local data is up to date.")
             start_time = None
         else:
             print(f"Gap detected. Fetching from {start_time}...")
     else:
-        start_time = datetime.now(timezone.utc) - timedelta(days=2)
+        start_time = datetime.now() - timedelta(days=2)
         print("No local data. Fetching last 2 days...")
 
     if start_time:

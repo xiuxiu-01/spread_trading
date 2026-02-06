@@ -1,11 +1,13 @@
 """
-MT5 Gateway implementation using JSON-RPC over TCP.
+MT5 Gateway implementation using MetaTrader5 Python library.
+
+Directly connects to MT5 terminal using the official Python package.
 """
 
 import asyncio
-import json
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
+from concurrent.futures import ThreadPoolExecutor
 
 from .base import BaseGateway, GatewayStatus
 from ..models import Tick, Order, OrderSide, OrderStatus, Position, PositionSide
@@ -13,55 +15,86 @@ from ..config.logging_config import get_logger
 
 logger = get_logger("gateway.mt5")
 
+# Try to import MetaTrader5
+try:
+    import MetaTrader5 as mt5
+    MT5_AVAILABLE = True
+except ImportError:
+    mt5 = None
+    MT5_AVAILABLE = False
+
 
 class MT5Gateway(BaseGateway):
     """
-    MetaTrader 5 Gateway using JSON-RPC protocol.
+    MetaTrader 5 Gateway using official Python library.
     
-    Connects to MT5 EA via TCP socket for real-time quotes and trading.
+    Directly connects to MT5 terminal for real-time quotes and trading.
+    Requires MetaTrader5 package: pip install MetaTrader5
     """
     
     def __init__(
         self,
         symbol: str = "XAUUSD",
-        host: str = "127.0.0.1",
-        port: int = 18812,
+        host: str = "127.0.0.1",  # Kept for compatibility, not used
+        port: int = 18812,        # Kept for compatibility, not used
         timeout: float = 5.0
     ):
         super().__init__(name="mt5", symbol=symbol)
-        self.host = host
-        self.port = port
         self.timeout = timeout
         
-        self._reader: Optional[asyncio.StreamReader] = None
-        self._writer: Optional[asyncio.StreamWriter] = None
-        self._request_id = 0
-        self._lock = asyncio.Lock()
+        # Thread pool for running MT5 calls in threads (MT5 lib is not async)
+        self._executor = ThreadPoolExecutor(max_workers=2)
         
         # Cache
         self._last_tick: Optional[Tick] = None
         self._position: Optional[Position] = None
+        self._initialized = False
+    
+    def _run_sync(self, func, *args, **kwargs):
+        """Run a synchronous function in thread pool."""
+        loop = asyncio.get_event_loop()
+        return loop.run_in_executor(self._executor, lambda: func(*args, **kwargs))
     
     async def connect(self) -> bool:
-        """Connect to MT5 EA server."""
+        """Connect to MT5 terminal."""
+        if not MT5_AVAILABLE:
+            logger.error("MetaTrader5 library not installed. Run: pip install MetaTrader5")
+            self._set_status(GatewayStatus.ERROR)
+            await self._emit_error("MetaTrader5 library not installed")
+            return False
+        
         try:
             self._set_status(GatewayStatus.CONNECTING)
-            logger.info(f"Connecting to MT5 at {self.host}:{self.port}")
+            logger.info(f"Connecting to MT5 terminal...")
             
-            self._reader, self._writer = await asyncio.wait_for(
-                asyncio.open_connection(self.host, self.port),
-                timeout=self.timeout
-            )
+            # Initialize MT5 in thread pool
+            initialized = await self._run_sync(mt5.initialize)
             
+            if not initialized:
+                error = mt5.last_error()
+                logger.error(f"MT5 initialization failed: {error}")
+                self._set_status(GatewayStatus.ERROR)
+                await self._emit_error(f"MT5 init failed: {error}")
+                return False
+            
+            # Enable symbol
+            await self._run_sync(mt5.symbol_select, self.symbol, True)
+            
+            # Verify we can get a tick
+            tick = await self._run_sync(mt5.symbol_info_tick, self.symbol)
+            if tick is None:
+                logger.warning(f"Could not get tick for {self.symbol}, but connection OK")
+            
+            self._initialized = True
             self._set_status(GatewayStatus.CONNECTED)
-            logger.info("MT5 connected successfully")
-            return True
+            logger.info(f"MT5 connected successfully (symbol: {self.symbol})")
             
-        except asyncio.TimeoutError:
-            logger.error("MT5 connection timeout")
-            self._set_status(GatewayStatus.ERROR)
-            await self._emit_error("Connection timeout")
-            return False
+            # Log account info
+            account = await self._run_sync(mt5.account_info)
+            if account:
+                logger.info(f"MT5 Account: {account.login} | Balance: {account.balance} {account.currency}")
+            
+            return True
             
         except Exception as e:
             logger.error(f"MT5 connection failed: {e}")
@@ -70,94 +103,46 @@ class MT5Gateway(BaseGateway):
             return False
     
     async def disconnect(self):
-        """Disconnect from MT5 EA server."""
-        if self._writer:
-            try:
-                self._writer.close()
-                await self._writer.wait_closed()
-            except Exception as e:
-                logger.warning(f"Error closing MT5 connection: {e}")
+        """Disconnect from MT5 terminal."""
+        try:
+            if self._initialized:
+                await self._run_sync(mt5.shutdown)
+                self._initialized = False
+        except Exception as e:
+            logger.warning(f"Error during MT5 shutdown: {e}")
         
-        self._reader = None
-        self._writer = None
         self._set_status(GatewayStatus.DISCONNECTED)
         logger.info("MT5 disconnected")
     
     async def is_connected(self) -> bool:
         """Check if connected to MT5."""
-        if not self._writer:
+        if not self._initialized:
             return False
         try:
-            # Try a simple request
-            await self._rpc_call("ping", {}, timeout=2.0)
-            return True
+            # Try to get terminal info
+            info = await self._run_sync(mt5.terminal_info)
+            return info is not None
         except Exception:
             return False
-    
-    async def _rpc_call(
-        self,
-        method: str,
-        params: Dict[str, Any],
-        timeout: Optional[float] = None
-    ) -> Any:
-        """Make JSON-RPC call to MT5 EA."""
-        if not self._writer or not self._reader:
-            raise ConnectionError("Not connected to MT5")
-        
-        async with self._lock:
-            self._request_id += 1
-            request = {
-                "jsonrpc": "2.0",
-                "id": self._request_id,
-                "method": method,
-                "params": params
-            }
-            
-            try:
-                # Send request
-                data = json.dumps(request).encode() + b"\n"
-                self._writer.write(data)
-                await self._writer.drain()
-                
-                # Read response
-                response_data = await asyncio.wait_for(
-                    self._reader.readline(),
-                    timeout=timeout or self.timeout
-                )
-                
-                if not response_data:
-                    raise ConnectionError("Empty response from MT5")
-                
-                response = json.loads(response_data.decode())
-                
-                if "error" in response:
-                    raise Exception(response["error"].get("message", "Unknown error"))
-                
-                return response.get("result")
-                
-            except asyncio.TimeoutError:
-                raise TimeoutError(f"MT5 RPC timeout: {method}")
-            except json.JSONDecodeError as e:
-                raise ValueError(f"Invalid JSON response: {e}")
     
     async def get_ticker(self) -> Optional[Tick]:
         """Get current MT5 ticker."""
         try:
-            result = await self._rpc_call("quote", {"symbol": self.symbol})
+            tick_data = await self._run_sync(mt5.symbol_info_tick, self.symbol)
             
-            if result and result.get("bid") and result.get("ask"):
-                tick = Tick(
-                    exchange="mt5",
-                    symbol=self.symbol,
-                    bid=float(result["bid"]),
-                    ask=float(result["ask"]),
-                    timestamp=datetime.now(timezone.utc),
-                    last=float(result.get("last", result["bid"]))
-                )
-                self._last_tick = tick
-                return tick
+            if tick_data is None:
+                return None
             
-            return None
+            tick = Tick(
+                exchange="mt5",
+                symbol=self.symbol,
+                bid=float(tick_data.bid),
+                ask=float(tick_data.ask),
+                timestamp=datetime.now(timezone.utc),
+                last=float(tick_data.last) if tick_data.last > 0 else (tick_data.bid + tick_data.ask) / 2.0
+            )
+            self._last_tick = tick
+            return tick
             
         except Exception as e:
             logger.error(f"MT5 get_ticker error: {e}")
@@ -180,30 +165,37 @@ class MT5Gateway(BaseGateway):
     ) -> List[Dict[str, Any]]:
         """Get MT5 historical klines."""
         try:
-            # Map timeframe to MT5 format
+            # Map timeframe to MT5 constant
             tf_map = {
-                "1m": "M1", "5m": "M5", "15m": "M15",
-                "1h": "H1", "4h": "H4", "1d": "D1"
+                "1m": mt5.TIMEFRAME_M1,
+                "5m": mt5.TIMEFRAME_M5,
+                "15m": mt5.TIMEFRAME_M15,
+                "30m": mt5.TIMEFRAME_M30,
+                "1h": mt5.TIMEFRAME_H1,
+                "4h": mt5.TIMEFRAME_H4,
+                "1d": mt5.TIMEFRAME_D1
             }
-            mt5_tf = tf_map.get(timeframe, "M1")
+            mt5_tf = tf_map.get(timeframe, mt5.TIMEFRAME_M1)
             
-            result = await self._rpc_call("klines", {
-                "symbol": self.symbol,
-                "timeframe": mt5_tf,
-                "limit": limit
-            })
+            rates = await self._run_sync(
+                mt5.copy_rates_from_pos,
+                self.symbol,
+                mt5_tf,
+                0,
+                limit
+            )
             
-            if result and isinstance(result, list):
-                return [{
-                    "time": bar.get("time"),
-                    "open": float(bar.get("open", 0)),
-                    "high": float(bar.get("high", 0)),
-                    "low": float(bar.get("low", 0)),
-                    "close": float(bar.get("close", 0)),
-                    "volume": int(bar.get("volume", 0))
-                } for bar in result]
+            if rates is None or len(rates) == 0:
+                return []
             
-            return []
+            return [{
+                "time": int(bar[0]),
+                "open": float(bar[1]),
+                "high": float(bar[2]),
+                "low": float(bar[3]),
+                "close": float(bar[4]),
+                "volume": int(bar[5])
+            } for bar in rates]
             
         except Exception as e:
             logger.error(f"MT5 get_klines error: {e}")
@@ -230,34 +222,51 @@ class MT5Gateway(BaseGateway):
         # Dry run mode - simulate order without sending
         if dry_run:
             order.mark_submitted(f"DRY_RUN_{id(order)}")
-            simulated_price = self._last_tick.ask if side == OrderSide.BUY else self._last_tick.bid if self._last_tick else price or 0
+            tick = await self.get_ticker()
+            simulated_price = tick.ask if side == OrderSide.BUY else tick.bid if tick else price or 0
             order.mark_filled(simulated_price)
             logger.info(f"[DRY_RUN] MT5 order simulated: {side.value} {volume} @ {simulated_price}")
             await self._emit_order(order)
             return order
         
         try:
-            # MT5 action mapping
-            action = "buy" if side == OrderSide.BUY else "sell"
+            # Get current tick for price
+            tick_data = await self._run_sync(mt5.symbol_info_tick, self.symbol)
+            if tick_data is None:
+                order.mark_failed("Could not get tick data")
+                await self._emit_order(order)
+                return order
             
-            result = await self._rpc_call("trade", {
-                "action": action,
-                "symbol": self.symbol,
-                "volume": volume,
-                "price": price,
-                "type": order_type
-            })
+            # Determine order price
+            if price is None:
+                price = float(tick_data.ask) if side == OrderSide.BUY else float(tick_data.bid)
             
-            if result and result.get("success"):
-                order.mark_submitted(str(result.get("ticket", "")))
-                
-                # If market order, assume filled immediately
-                if order_type == "market":
-                    fill_price = float(result.get("price", price or 0))
-                    order.mark_filled(fill_price)
-                    logger.info(f"MT5 order filled: {side.value} {volume} @ {fill_price}")
+            # Build order request
+            order_type_mt5 = mt5.ORDER_TYPE_BUY if side == OrderSide.BUY else mt5.ORDER_TYPE_SELL
+            
+            request = {
+                'action': mt5.TRADE_ACTION_DEAL,
+                'symbol': self.symbol,
+                'volume': float(volume),
+                'type': order_type_mt5,
+                'price': price,
+                'deviation': 20,
+                'magic': 234000,
+                'comment': 'spread_trading',
+                'type_filling': mt5.ORDER_FILLING_IOC,
+                'type_time': mt5.ORDER_TIME_GTC,
+            }
+            
+            result = await self._run_sync(mt5.order_send, request)
+            
+            if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+                order.mark_submitted(str(result.order))
+                order.mark_filled(float(result.price))
+                logger.info(f"MT5 order filled: {side.value} {volume} @ {result.price}")
             else:
-                error = result.get("error", "Unknown error") if result else "No response"
+                error = f"retcode={result.retcode if result else 'None'}"
+                if result:
+                    error += f", comment={result.comment}"
                 order.mark_failed(error)
                 logger.error(f"MT5 order failed: {error}")
             
@@ -273,8 +282,12 @@ class MT5Gateway(BaseGateway):
     async def cancel_order(self, order_id: str) -> bool:
         """Cancel MT5 order."""
         try:
-            result = await self._rpc_call("cancel", {"ticket": int(order_id)})
-            return result and result.get("success", False)
+            request = {
+                'action': mt5.TRADE_ACTION_REMOVE,
+                'order': int(order_id),
+            }
+            result = await self._run_sync(mt5.order_send, request)
+            return result and result.retcode == mt5.TRADE_RETCODE_DONE
         except Exception as e:
             logger.error(f"MT5 cancel_order error: {e}")
             return False
@@ -282,29 +295,46 @@ class MT5Gateway(BaseGateway):
     async def get_position(self) -> Optional[Position]:
         """Get MT5 position for symbol."""
         try:
-            result = await self._rpc_call("positions", {"symbol": self.symbol})
+            positions = await self._run_sync(mt5.positions_get, symbol=self.symbol)
             
-            if result and result.get("positions"):
-                pos_data = result["positions"][0]  # Take first position
-                
-                side = PositionSide.FLAT
-                if pos_data.get("type") == "buy":
+            if positions is None or len(positions) == 0:
+                return Position(exchange="mt5", symbol=self.symbol)
+            
+            # Aggregate positions
+            total_volume = 0.0
+            total_profit = 0.0
+            weighted_price = 0.0
+            side = PositionSide.FLAT
+            
+            for pos in positions:
+                if pos.type == mt5.POSITION_TYPE_BUY:
+                    total_volume += pos.volume
+                    weighted_price += pos.price_open * pos.volume
                     side = PositionSide.LONG
-                elif pos_data.get("type") == "sell":
+                else:
+                    total_volume -= pos.volume
+                    weighted_price += pos.price_open * pos.volume
                     side = PositionSide.SHORT
-                
-                position = Position(
-                    exchange="mt5",
-                    symbol=self.symbol,
-                    side=side,
-                    volume=float(pos_data.get("volume", 0)),
-                    avg_entry_price=float(pos_data.get("price", 0)),
-                    unrealized_pnl=float(pos_data.get("profit", 0))
-                )
-                self._position = position
-                return position
+                total_profit += pos.profit
             
-            return Position(exchange="mt5", symbol=self.symbol)
+            if abs(total_volume) < 0.001:
+                side = PositionSide.FLAT
+            elif total_volume < 0:
+                side = PositionSide.SHORT
+                total_volume = abs(total_volume)
+            
+            avg_price = weighted_price / sum(p.volume for p in positions) if positions else 0
+            
+            position = Position(
+                exchange="mt5",
+                symbol=self.symbol,
+                side=side,
+                volume=abs(total_volume),
+                avg_entry_price=avg_price,
+                unrealized_pnl=total_profit
+            )
+            self._position = position
+            return position
             
         except Exception as e:
             logger.error(f"MT5 get_position error: {e}")
@@ -313,15 +343,15 @@ class MT5Gateway(BaseGateway):
     async def get_balance(self) -> Dict[str, float]:
         """Get MT5 account balance."""
         try:
-            result = await self._rpc_call("account", {})
+            account = await self._run_sync(mt5.account_info)
             
-            if result:
+            if account:
                 return {
-                    "balance": float(result.get("balance", 0)),
-                    "equity": float(result.get("equity", 0)),
-                    "margin": float(result.get("margin", 0)),
-                    "free_margin": float(result.get("freeMargin", 0)),
-                    "currency": result.get("currency", "USD")
+                    "balance": float(account.balance),
+                    "equity": float(account.equity),
+                    "margin": float(account.margin),
+                    "free_margin": float(account.margin_free),
+                    "currency": account.currency
                 }
             
             return {}

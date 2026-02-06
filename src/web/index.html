@@ -642,7 +642,8 @@
 <body>
     <header>
         <div class="header-left">
-            <h1>Arbitrage Monitor</h1>
+            <h1 id="pageTitle">Arbitrage Monitor</h1>
+            <span id="taskInfo" style="font-size: 0.8rem; color: var(--text-secondary);"></span>
             <a href="admin.html" class="admin-link">📊 Admin Dashboard</a>
         </div>
         <div id="connectionStatus" class="status disconnected">未连接</div>
@@ -1734,6 +1735,42 @@
             }
             
         }
+
+        // =================================================================
+        // Task Info from URL Parameters
+        // =================================================================
+        const SYMBOL_ICONS = {
+            'XAUUSD': '🥇',
+            'XAGUSD': '🥈',
+            'BTCUSD': '₿',
+            'ETHUSD': 'Ξ'
+        };
+        
+        function initTaskFromUrl() {
+            const qs = new URLSearchParams(window.location.search);
+            const taskId = qs.get('task');
+            const symbol = qs.get('symbol');
+            const exA = qs.get('exA');
+            const exB = qs.get('exB');
+            const symA = qs.get('symA');
+            const symB = qs.get('symB');
+            
+            if (taskId) {
+                const icon = SYMBOL_ICONS[symbol] || '';
+                document.getElementById('pageTitle').textContent = `${icon} ${symbol || 'Arbitrage'} Monitor`;
+                document.title = `${symbol || 'Arbitrage'} - ${exA?.toUpperCase() || ''} ↔ ${exB?.toUpperCase() || ''}`;
+                
+                const taskInfo = document.getElementById('taskInfo');
+                if (taskInfo && exA && exB) {
+                    taskInfo.innerHTML = `<strong>${exA.toUpperCase()}</strong>: ${symA || symbol} ↔ <strong>${exB.toUpperCase()}</strong>: ${symB || symbol}`;
+                }
+                
+                addLog(`任务: ${taskId}`, 'info');
+                addLog(`品种: ${symbol} | 交易所: ${exA?.toUpperCase()} ↔ ${exB?.toUpperCase()}`, 'info');
+            }
+        }
+        
+        initTaskFromUrl();
 
         // Start
         addLog('套利监控已启动', 'info');

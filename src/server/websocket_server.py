@@ -37,7 +37,8 @@ class WebSocketServer:
         self,
         host: str = "0.0.0.0",
         port: int = 8766,
-        message_handler: Optional[Callable[[Any, Dict], Awaitable[None]]] = None
+        message_handler: Optional[Callable[[Any, Dict], Awaitable[None]]] = None,
+        connect_handler: Optional[Callable[[Any], Awaitable[None]]] = None
     ):
         """
         Initialize WebSocket server.
@@ -46,6 +47,7 @@ class WebSocketServer:
             host: Server host
             port: Server port
             message_handler: Async function to handle incoming messages
+            connect_handler: Async function to call when client connects
         """
         if not WEBSOCKETS_AVAILABLE:
             raise ImportError("websockets library not installed. Run: pip install websockets")
@@ -53,6 +55,7 @@ class WebSocketServer:
         self.host = host
         self.port = port
         self.message_handler = message_handler
+        self.connect_handler = connect_handler
         
         self.clients: Set[WebSocketServerProtocol] = set()
         self.server = None
@@ -67,7 +70,8 @@ class WebSocketServer:
             self.host,
             self.port,
             ping_interval=30,
-            ping_timeout=10
+            ping_timeout=10,
+            max_size=10 * 1024 * 1024,  # 10MB max message size for history
         )
         
         self._running = True
@@ -104,6 +108,13 @@ class WebSocketServer:
         
         logger.info(f"Client connected: {client_addr} (id={client_id})")
         self.clients.add(websocket)
+        
+        # Call connect handler to send initial state
+        if self.connect_handler:
+            try:
+                await self.connect_handler(websocket)
+            except Exception as e:
+                logger.error(f"Connect handler error: {e}")
         
         try:
             async for message in websocket:

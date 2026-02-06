@@ -15,6 +15,8 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
 
+import aiohttp
+
 from .base import BaseGateway, GatewayStatus
 from ..models import Tick, Order, OrderSide, OrderStatus, Position, PositionSide
 from ..config.logging_config import get_logger
@@ -91,6 +93,7 @@ class CCXTGateway(BaseGateway):
         self._exchange: Optional[Any] = None
         self._ws_task: Optional[asyncio.Task] = None
         self._running = False
+        self._session: Optional[aiohttp.ClientSession] = None
         
         # Cache
         self._last_tick: Optional[Tick] = None
@@ -106,19 +109,53 @@ class CCXTGateway(BaseGateway):
         if not exchange_class:
             raise ValueError(f"Exchange '{self.exchange_id}' not supported by CCXT")
         
+        # Determine market type from symbol
+        # Symbols like "XAU/USDT:USDT" or "BTC/USDT:USDT" are perpetual swaps
+        is_swap = ":USDT" in self.symbol or ":USD" in self.symbol
+        market_type = "swap" if is_swap else "spot"
+        
         config = {
             "apiKey": self.api_key,
             "secret": self.api_secret,
             "enableRateLimit": True,
             "options": {
-                "defaultType": "swap",  # For futures/perpetual
+                "defaultType": market_type,
                 **self.options
             }
         }
         
+        # OKX-specific: Force swap market type
+        if self.exchange_id == "okx" and is_swap:
+            config["options"]["defaultMarket"] = "swap"
+            # OKX requires instType for API calls
+            config["options"]["instType"] = "SWAP"
+            config["options"]["fetchMarkets"] = ["swap"]
+        
+        # Binance-specific: Force perpetual futures
+        if self.exchange_id == "binance" and is_swap:
+            config["options"]["defaultType"] = "future"
+            config["options"]["adjustForTimeDifference"] = True
+        
         # Add password if provided (OKX, etc.)
         if self.password:
             config["password"] = self.password
+        
+        # Add proxy settings if available
+        import os
+        http_proxy = os.getenv('HTTP_PROXY')
+        https_proxy = os.getenv('HTTPS_PROXY')
+        if http_proxy or https_proxy:
+            proxies = {}
+            if http_proxy:
+                proxies['http'] = http_proxy
+            if https_proxy:
+                proxies['https'] = https_proxy
+            config['proxies'] = proxies
+        
+        # Create aiohttp session with ThreadedResolver to avoid aiodns DNS issues on Windows
+        connector = aiohttp.TCPConnector(resolver=aiohttp.resolver.ThreadedResolver())
+        self._session = aiohttp.ClientSession(connector=connector)
+        config['session'] = self._session
         
         exchange = exchange_class(config)
         
@@ -126,6 +163,7 @@ class CCXTGateway(BaseGateway):
         if self.sandbox:
             exchange.set_sandbox_mode(True)
         
+        logger.info(f"Created {self.exchange_id} exchange with market type: {market_type}")
         return exchange
     
     async def connect(self) -> bool:
@@ -137,13 +175,25 @@ class CCXTGateway(BaseGateway):
             self._exchange = self._create_exchange()
             
             # Load markets to verify connection
-            await self._exchange.load_markets()
+            # For swap/perpetual contracts, we need to load the right market type
+            is_swap = ":USDT" in self.symbol or ":USD" in self.symbol
+            
+            if self.exchange_id == "okx" and is_swap:
+                # OKX: load only swap markets by passing params
+                logger.info(f"Loading OKX swap markets...")
+                await self._exchange.load_markets(params={"instType": "SWAP"})
+            else:
+                await self._exchange.load_markets()
             
             # Verify symbol exists
             if self.symbol not in self._exchange.markets:
                 # Try to find similar symbol
-                available = [s for s in self._exchange.markets if "XAU" in s or "GOLD" in s]
-                logger.warning(f"Symbol {self.symbol} not found. Available: {available[:5]}")
+                symbol_base = self.symbol.split('/')[0] if '/' in self.symbol else self.symbol
+                available = [s for s in self._exchange.markets if symbol_base in s][:10]
+                logger.warning(f"Symbol {self.symbol} not found. Similar: {available}")
+                # Don't fail, just warn
+            else:
+                logger.info(f"Symbol {self.symbol} found in {self.name} markets")
             
             self._set_status(GatewayStatus.CONNECTED)
             logger.info(f"{self.name} connected successfully")
@@ -171,6 +221,14 @@ class CCXTGateway(BaseGateway):
                 await self._exchange.close()
             except Exception as e:
                 logger.warning(f"Error closing {self.name}: {e}")
+        
+        # Close the aiohttp session
+        if self._session:
+            try:
+                await self._session.close()
+            except Exception as e:
+                logger.warning(f"Error closing session for {self.name}: {e}")
+            self._session = None
         
         self._exchange = None
         self._set_status(GatewayStatus.DISCONNECTED)

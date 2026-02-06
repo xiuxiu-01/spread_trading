@@ -75,17 +75,18 @@ class SymbolMapping:
 # PRECIOUS METALS
 # =============================================================================
 
+# Verified 2026-02-06: All contracts tested for orderbook + 1m kline data
 XAUUSD = SymbolMapping(
     name="Gold (XAU/USD)",
     code="XAUUSD",
     mt5="XAUUSD",
-    okx="XAU/USDT:USDT",      # OKX Gold perpetual swap
-    binance="PAXG/USDT",       # Binance uses PAXG (Pax Gold token)
-    bybit="XAUUSDT",           # Bybit Gold perpetual
-    gate="PAXG_USDT",          # Gate.io PAXG
-    bitget="XAUUSDT",          # Bitget Gold perpetual  
-    bitmart="",                # BitMart - no gold contract
-    lbank="",                  # LBank - no gold contract
+    okx="XAU/USDT:USDT",      # OKX Gold perpetual swap ✅ ~4893
+    binance="XAU/USDT:USDT",   # Binance Gold perpetual swap ✅ ~4914
+    bybit="PAXG/USDT:USDT",    # Bybit PAXG (Pax Gold) swap ✅ ~4915
+    gate="XAU/USDT:USDT",      # Gate.io Gold swap ✅ ~4918
+    bitget="XAU/USDT:USDT",    # Bitget Gold perpetual swap ✅ ~4916
+    bitmart="XAU/USDT:USDT",   # BitMart Gold swap ✅ ~4917
+    lbank="",                  # LBank ❌ K线数据不可用
     mt5_lot_size=0.01,
     exchange_lot_size=1,       # 1 contract = 1 oz
     lot_ratio=100,             # 0.01 MT5 lot = 1 exchange contract
@@ -94,17 +95,18 @@ XAUUSD = SymbolMapping(
     default_take_profit=0.5,
 )
 
+# Verified 2026-02-06: All contracts tested for orderbook + 1m kline data
 XAGUSD = SymbolMapping(
     name="Silver (XAG/USD)",
     code="XAGUSD",
     mt5="XAGUSD",
-    okx="XAG/USDT:USDT",      # OKX Silver perpetual (if available)
-    binance="",                # No silver on Binance spot/futures
-    bybit="XAGUSDT",           # Bybit Silver perpetual
-    gate="",                   # Gate.io - no silver
-    bitget="XAGUSDT",          # Bitget Silver perpetual
-    bitmart="",
-    lbank="",
+    okx="XAG/USDT:USDT",      # OKX Silver perpetual swap ✅ ~76.18
+    binance="XAG/USDT:USDT",   # Binance Silver perpetual swap ✅ ~76.19
+    bybit="",                  # Bybit 没有 XAG 合约
+    gate="XAG/USDT:USDT",      # Gate.io Silver swap ✅ ~76.20
+    bitget="XAG/USDT:USDT",    # Bitget Silver perpetual swap ✅ ~76.20
+    bitmart="XAG/USDT:USDT",   # BitMart Silver swap ✅ ~76.17
+    lbank="",                  # LBank ❌ K线数据不可用
     mt5_lot_size=0.01,
     exchange_lot_size=1,
     lot_ratio=100,
@@ -122,11 +124,11 @@ EURUSD = SymbolMapping(
     name="EUR/USD",
     code="EURUSD",
     mt5="EURUSD",
-    okx="",                    # Most crypto exchanges don't have forex
-    binance="EUR/USDT",        # Binance has EUR/USDT
-    bybit="",
-    gate="EUR_USDT",
-    bitget="",
+    okx="",                    # OKX 没有 EUR 合约
+    binance="EUR/USDT",        # Binance EUR/USDT ✅
+    bybit="",                  # Bybit 没有 EUR 合约
+    gate="",                   # Gate.io 没有 EUR 合约
+    bitget="",                 # Bitget 没有 EUR 合约
     bitmart="",
     lbank="",
     mt5_lot_size=0.01,
@@ -146,11 +148,11 @@ BTCUSD = SymbolMapping(
     name="Bitcoin (BTC/USD)",
     code="BTCUSD",
     mt5="BTCUSD",              # If MT5 broker supports crypto
-    okx="BTC/USDT:USDT",
-    binance="BTC/USDT",
-    bybit="BTCUSDT",
-    gate="BTC_USDT",
-    bitget="BTCUSDT",
+    okx="BTC/USDT:USDT",       # OKX perpetual swap ✅
+    binance="BTC/USDT",        # Binance spot ✅
+    bybit="BTC/USDT:USDT",     # Bybit perpetual swap ✅
+    gate="BTC/USDT",           # Gate.io spot ✅
+    bitget="BTC/USDT:USDT",    # Bitget perpetual swap ✅
     bitmart="BTC_USDT",
     lbank="btc_usdt",
     mt5_lot_size=0.01,
@@ -165,11 +167,11 @@ ETHUSD = SymbolMapping(
     name="Ethereum (ETH/USD)",
     code="ETHUSD",
     mt5="ETHUSD",
-    okx="ETH/USDT:USDT",
-    binance="ETH/USDT",
-    bybit="ETHUSDT",
-    gate="ETH_USDT",
-    bitget="ETHUSDT",
+    okx="ETH/USDT:USDT",       # OKX perpetual swap ✅
+    binance="ETH/USDT",        # Binance spot ✅
+    bybit="ETH/USDT:USDT",     # Bybit perpetual swap ✅
+    gate="ETH/USDT",           # Gate.io spot ✅
+    bitget="ETH/USDT:USDT",    # Bitget perpetual swap ✅
     bitmart="ETH_USDT",
     lbank="eth_usdt",
     mt5_lot_size=0.01,
