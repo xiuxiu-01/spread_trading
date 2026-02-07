@@ -241,23 +241,76 @@ class MT5Gateway(BaseGateway):
             if price is None:
                 price = float(tick_data.ask) if side == OrderSide.BUY else float(tick_data.bid)
             
-            # Build order request
-            order_type_mt5 = mt5.ORDER_TYPE_BUY if side == OrderSide.BUY else mt5.ORDER_TYPE_SELL
-            
-            request = {
-                'action': mt5.TRADE_ACTION_DEAL,
-                'symbol': self.symbol,
-                'volume': float(volume),
-                'type': order_type_mt5,
-                'price': price,
-                'deviation': 20,
-                'magic': 234000,
-                'comment': 'spread_trading',
-                'type_filling': mt5.ORDER_FILLING_IOC,
-                'type_time': mt5.ORDER_TIME_GTC,
-            }
-            
-            result = await self._run_sync(mt5.order_send, request)
+            # Use smart order placement (Handle Hedge Mode: Close opposite first)
+            def _place_smart():
+                # Check account mode
+                account_info = mt5.account_info()
+                is_hedge = account_info and account_info.margin_mode == mt5.ACCOUNT_MARGIN_MODE_RETAIL_HEDGING
+                
+                remaining_vol = float(volume)
+                results = []
+                
+                # Close opposite positions first if in Hedge mode
+                if is_hedge:
+                    positions = mt5.positions_get(symbol=self.symbol)
+                    if positions:
+                        # If buying, close sells. If selling, close buys.
+                        opposite_type = mt5.POSITION_TYPE_SELL if side == OrderSide.BUY else mt5.POSITION_TYPE_BUY
+                        
+                        for pos in positions:
+                            if pos.type == opposite_type and remaining_vol > 0.001:
+                                close_vol = min(pos.volume, remaining_vol)
+                                # Price for closing is opposite of opening
+                                close_price = float(tick_data.ask) if side == OrderSide.BUY else float(tick_data.bid)
+                                
+                                close_request = {
+                                    'action': mt5.TRADE_ACTION_DEAL,
+                                    'symbol': self.symbol,
+                                    'volume': close_vol,
+                                    'type': mt5.ORDER_TYPE_BUY if side == OrderSide.BUY else mt5.ORDER_TYPE_SELL,
+                                    'position': pos.ticket,
+                                    'price': close_price,
+                                    'deviation': 20,
+                                    'magic': 234000,
+                                    'comment': 'spread_close',
+                                    'type_filling': mt5.ORDER_FILLING_IOC,
+                                    'type_time': mt5.ORDER_TIME_GTC,
+                                }
+                                
+                                res = mt5.order_send(close_request)
+                                results.append(res)
+                                
+                                if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+                                    logger.info(f"Closed opposite pos {pos.ticket}: {close_vol} lots")
+                                    remaining_vol -= close_vol
+                                else:
+                                    logger.warning(f"Failed to close pos {pos.ticket}: {res.retcode if res else 'None'}")
+
+                # Open new position with remaining volume
+                if remaining_vol > 0.001:
+                    order_type_mt5 = mt5.ORDER_TYPE_BUY if side == OrderSide.BUY else mt5.ORDER_TYPE_SELL
+                    request = {
+                        'action': mt5.TRADE_ACTION_DEAL,
+                        'symbol': self.symbol,
+                        'volume': remaining_vol,
+                        'type': order_type_mt5,
+                        'price': price,
+                        'deviation': 20,
+                        'magic': 234000,
+                        'comment': 'spread_open',
+                        'type_filling': mt5.ORDER_FILLING_IOC,
+                        'type_time': mt5.ORDER_TIME_GTC,
+                    }
+                    res = mt5.order_send(request)
+                    results.append(res)
+                
+                # Return the last successful result, or the first failure
+                success_results = [r for r in results if r and r.retcode == mt5.TRADE_RETCODE_DONE]
+                if success_results:
+                    return success_results[-1]
+                return results[-1] if results else None
+
+            result = await self._run_sync(_place_smart)
             
             if result and result.retcode == mt5.TRADE_RETCODE_DONE:
                 order.mark_submitted(str(result.order))

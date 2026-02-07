@@ -96,20 +96,21 @@ class SpreadTradingApp:
             await asyncio.sleep(1)
     
     async def _create_default_task(self):
-        """Create the default MT5-OKX arbitrage task."""
+        """Create the default MT5-OKX arbitrage tasks (Gold and Silver)."""
         try:
             # Create task even if OKX not configured (for testing/monitoring)
             okx_config = settings.get_exchange("okx")
-            has_okx = okx_config and okx_config.api_key
             
-            if not has_okx:
-                logger.warning("OKX not configured - task will be created but not auto-started")
+            # --- GOLD (XAU) ---
+            # MT5 1 Lot = 100 oz
+            # OKX 1 Contract = 0.001 oz
+            # Multiplier = 100 / 0.001 = 100,000
             
-            task = await self.manager.create_task(
-                task_id="mt5-okx",
+            task_xau = await self.manager.create_task(
+                task_id="mt5-okx-xau",
                 exchange_a="mt5",
                 exchange_b="okx",
-                symbol_a=settings.mt5.symbol,
+                symbol_a="XAUUSD",
                 symbol_b="XAU/USDT:USDT",
                 config={
                     "emaPeriod": settings.strategy.ema_period,
@@ -119,21 +120,50 @@ class SpreadTradingApp:
                     "maxPos": settings.strategy.max_pos,
                     "autoTrade": settings.strategy.auto_trade,
                     "dryRun": settings.strategy.dry_run,
+                    "tradeVolume": 0.01,
+                    "qtyMultiplier": 100000.0,
                 }
             )
+            logger.info(f"Created default XAU task: {task_xau.task_id}")
+
+            # --- SILVER (XAG) ---
+            # MT5 1 Lot = 5000 oz
+            # OKX 1 Contract = 0.01 oz
+            # Multiplier = 5000 / 0.01 = 500,000
             
-            logger.info(f"Created default task: {task.task_id}")
-            
-            # Auto-start if configured
-            # await self.manager.start_task(task.task_id)
+            # Use smaller spreads for Silver
+            task_xag = await self.manager.create_task(
+                task_id="mt5-okx-xag",
+                exchange_a="mt5",
+                exchange_b="okx",
+                symbol_a="XAGUSD",
+                symbol_b="XAG/USDT:USDT",
+                config={
+                    "emaPeriod": 120,
+                    "firstSpread": 0.05,  # Silver spreads are smaller
+                    "nextSpread": 0.03,
+                    "takeProfit": 0.08,
+                    "maxPos": 3,
+                    "autoTrade": False,
+                    "dryRun": True,
+                    "tradeVolume": 0.01,
+                    "qtyMultiplier": 500000.0,
+                }
+            )
+            logger.info(f"Created default XAG task: {task_xag.task_id}")
+
+            # Start tasks
+            await self.manager.start_task("mt5-okx-xau")
+            await self.manager.start_task("mt5-okx-xag")
             
         except Exception as e:
-            logger.error(f"Error creating default task: {e}")
+            logger.error(f"Error creating default tasks: {e}")
     
     async def _on_tick(self, task_id: str, tick_data: dict):
         """Handle tick updates from manager."""
         await self.server.broadcast({
             "type": "tick",
+            "task_id": task_id,
             "payload": tick_data
         })
     
@@ -141,6 +171,7 @@ class SpreadTradingApp:
         """Handle bar updates from manager."""
         await self.server.broadcast({
             "type": "bar",
+            "task_id": task_id,
             "payload": bar_data
         })
     
@@ -148,6 +179,7 @@ class SpreadTradingApp:
         """Handle trade events from manager."""
         await self.server.broadcast({
             "type": "trade_result",
+            "task_id": task_id,
             "payload": trade_data
         })
     

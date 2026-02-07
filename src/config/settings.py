@@ -6,6 +6,10 @@ import os
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional
 from pathlib import Path
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 
 @dataclass
@@ -104,7 +108,10 @@ class Settings:
             upper_name = name.upper()
             api_key = os.getenv(f"{upper_name}_API_KEY", "")
             api_secret = os.getenv(f"{upper_name}_API_SECRET", "")
-            password = os.getenv(f"{upper_name}_PASSWORD", "")
+            password = os.getenv(f"{upper_name}_PASSWORD", "") or \
+                      os.getenv(f"{upper_name}_PASSPHRASE", "") or \
+                      os.getenv(f"{upper_name}_API_PASSPHRASE", "")
+            
             sandbox = os.getenv(f"{upper_name}_SANDBOX", "false").lower() == "true"
             enabled = os.getenv(f"{upper_name}_ENABLED", "false").lower() == "true"
             

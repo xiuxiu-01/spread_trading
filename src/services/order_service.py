@@ -64,7 +64,8 @@ class OrderService:
         gateway_b: BaseGateway,
         direction: str,
         volume: float,
-        dry_run: bool = True
+        dry_run: bool = True,
+        qty_multiplier: float = 100.0
     ) -> Dict[str, Any]:
         """
         Execute arbitrage order pair.
@@ -73,8 +74,9 @@ class OrderService:
             gateway_a: First exchange gateway (e.g., MT5)
             gateway_b: Second exchange gateway (e.g., OKX)
             direction: "long" (buy A, sell B) or "short" (sell A, buy B)
-            volume: Order volume
+            volume: Order volume (base on gateway_a)
             dry_run: If True, simulate orders without sending
+            qty_multiplier: Multiplier for gateway_b volume
         
         Returns:
             Result dictionary with order details
@@ -83,24 +85,29 @@ class OrderService:
             "success": False,
             "direction": direction,
             "volume": volume,
+            "qty_multiplier": qty_multiplier,
             "order_a": None,
             "order_b": None,
             "error": None,
             "dry_run": dry_run
         }
         
+        # Calculate volumes
+        volume_a = volume
+        volume_b = volume * qty_multiplier
+
         if dry_run:
-            logger.info(f"[DRY_RUN] Simulating arbitrage orders: {direction} {volume}")
+            logger.info(f"[DRY_RUN] Simulating arbitrage orders: {direction} A:{volume_a} B:{volume_b}")
         
         try:
             if direction == "long":
                 # Buy on A, Sell on B
-                order_a = await gateway_a.place_order(OrderSide.BUY, volume, dry_run=dry_run)
-                order_b = await gateway_b.place_order(OrderSide.SELL, volume, dry_run=dry_run)
+                order_a = await gateway_a.place_order(OrderSide.BUY, volume_a, dry_run=dry_run)
+                order_b = await gateway_b.place_order(OrderSide.SELL, volume_b, dry_run=dry_run)
             else:
                 # Sell on A, Buy on B
-                order_a = await gateway_a.place_order(OrderSide.SELL, volume, dry_run=dry_run)
-                order_b = await gateway_b.place_order(OrderSide.BUY, volume, dry_run=dry_run)
+                order_a = await gateway_a.place_order(OrderSide.SELL, volume_a, dry_run=dry_run)
+                order_b = await gateway_b.place_order(OrderSide.BUY, volume_b, dry_run=dry_run)
             
             result["order_a"] = order_a.to_dict()
             result["order_b"] = order_b.to_dict()
@@ -108,7 +115,7 @@ class OrderService:
             # Check if both filled
             if order_a.status == OrderStatus.FILLED and order_b.status == OrderStatus.FILLED:
                 result["success"] = True
-                logger.info(f"Arbitrage orders executed: {direction} {volume}")
+                logger.info(f"Arbitrage orders executed: {direction} A:{volume_a} B:{volume_b}")
             else:
                 result["error"] = "One or both orders not filled"
                 logger.warning(f"Partial fill: A={order_a.status.value}, B={order_b.status.value}")
@@ -129,7 +136,8 @@ class OrderService:
         gateway_b: BaseGateway,
         direction: str,
         volume: float,
-        dry_run: bool = True
+        dry_run: bool = True,
+        qty_multiplier: float = 100.0
     ) -> Dict[str, Any]:
         """
         Close arbitrage position.
@@ -140,6 +148,7 @@ class OrderService:
             direction: Current position direction
             volume: Position volume to close
             dry_run: If True, simulate orders without sending
+            qty_multiplier: Multiplier for gateway_b volume
         
         Returns:
             Result dictionary
@@ -147,7 +156,7 @@ class OrderService:
         # Close is opposite of open
         close_direction = "short" if direction == "long" else "long"
         return await self.execute_arbitrage_orders(
-            gateway_a, gateway_b, close_direction, volume, dry_run=dry_run
+            gateway_a, gateway_b, close_direction, volume, dry_run=dry_run, qty_multiplier=qty_multiplier
         )
     
     def _save_order(self, order: Order):
@@ -185,3 +194,43 @@ class OrderService:
             "commission": sum(o.get("commission", 0) for o in orders),
             "trade_count": len(orders) // 2
         }
+
+    async def close_positions(self, gateway_a: BaseGateway, gateway_b: BaseGateway, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Close all positions on both gateways.
+        
+        Args:
+            gateway_a: First exchange gateway
+            gateway_b: Second exchange gateway
+            params: Parameters (dryRun, etc.)
+            
+        Returns:
+            Result dictionary
+        """
+        dry_run = params.get("dryRun", True)
+        result = {"status": "unknown", "closed_a": None, "closed_b": None}
+        
+        try:
+            # 1. Check positions
+            pos_a = await gateway_a.get_position()
+            pos_b = await gateway_b.get_position()
+            
+            # 2. Close A if exists
+            if pos_a and pos_a.volume > 0:
+                # Close by placing opposite order
+                side = OrderSide.SELL if pos_a.side.value == "long" else OrderSide.BUY
+                result["closed_a"] = await gateway_a.place_order(side, pos_a.volume, dry_run=dry_run)
+            
+            # 3. Close B if exists
+            if pos_b and pos_b.volume > 0:
+                side = OrderSide.SELL if pos_b.side.value == "long" else OrderSide.BUY
+                result["closed_b"] = await gateway_b.place_order(side, pos_b.volume, dry_run=dry_run)
+                
+            result["status"] = "closed"
+            
+        except Exception as e:
+            result["status"] = "failed"
+            result["error"] = str(e)
+            logger.error(f"Error closing positions: {e}")
+            
+        return result

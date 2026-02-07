@@ -29,7 +29,8 @@ class KLineAggregator:
         self,
         data_dir: Path,
         ema_period: int = 20,
-        max_bars: int = 5000
+        max_bars: int = 5000,
+        filename: str = "history.jsonl"
     ):
         """
         Initialize aggregator.
@@ -38,6 +39,7 @@ class KLineAggregator:
             data_dir: Directory for data persistence
             ema_period: EMA calculation period
             max_bars: Maximum bars to keep in memory
+            filename: Name of the history file
         """
         self.data_dir = data_dir
         self.ema_period = ema_period
@@ -56,7 +58,7 @@ class KLineAggregator:
         self.spread_buffer: deque = deque(maxlen=50)  # ~5 seconds at 10 ticks/sec
         
         # File paths
-        self.history_file = data_dir / "history.jsonl"
+        self.history_file = data_dir / filename
         self.daily_logs_dir = data_dir / "daily_logs"
         self.daily_logs_dir.mkdir(parents=True, exist_ok=True)
     

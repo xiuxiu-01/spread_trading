@@ -792,9 +792,11 @@
         let dashboardData = {};
         
         function connect() {
-            const wsHost = window.location.host || 'localhost:8765';
+            // Fix WebSocket port to 8766
             const wsProtocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
-            const wsUrl = `${wsProtocol}://${wsHost}/ws`;
+            const wsHost = window.location.hostname; // use hostname to keep localhost/IP
+            // Hardcode port 8766 as per backend config
+            const wsUrl = `${wsProtocol}://${wsHost}:8766/ws`;
             
             console.log('Connecting to', wsUrl);
             
@@ -857,16 +859,38 @@
         }
         
         function handleMessage(msg) {
+            console.log('Received message:', msg);
+            
             if (msg.type === 'dashboard') {
                 updateDashboard(msg.payload);
             } else if (msg.type === 'tasks') {
                 updateTasksTable(msg.payload);
             } else if (msg.type === 'task_created') {
+                alert('Task created successfully!');
                 refreshDashboard();
+                closeCreateTaskModal();
+                
+                // Reset button
+                const btn = document.querySelector('#createTaskModal .btn-primary');
+                if (btn) {
+                    btn.disabled = false;
+                    btn.textContent = btn.dataset.originalText || 'Create Task';
+                }
+            } else if (msg.type === 'task_creation_failed') {
+                alert('Task Creation Failed:\n' + (msg.payload.error || 'Unknown error'));
+                
+                // Reset button
+                const btn = document.querySelector('#createTaskModal .btn-primary');
+                if (btn) {
+                    btn.disabled = false;
+                    btn.textContent = btn.dataset.originalText || 'Create Task';
+                }
             } else if (msg.type === 'task_status') {
                 refreshDashboard();
             } else if (msg.type === 'tick') {
                 updateLiveSpreads(msg.payload);
+            } else if (msg.type === 'error') {
+                alert('Error: ' + (msg.payload.message || 'Unknown error'));
             }
         }
         
@@ -1062,13 +1086,31 @@
             };
             
             if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ 
-                    type: 'create_task', 
-                    payload: payload 
-                }));
+                // Show loading state
+                const btn = document.querySelector('#createTaskModal .btn-primary');
+                if (btn) {
+                    btn.disabled = true;
+                    btn.dataset.originalText = btn.textContent;
+                    btn.textContent = 'Creating...';
+                }
+
+                try {
+                    ws.send(JSON.stringify({ 
+                        type: 'create_task', 
+                        payload: payload 
+                    }));
+                } catch (e) {
+                    alert('Error sending task request: ' + e.message);
+                    if (btn) {
+                        btn.disabled = false;
+                        btn.textContent = btn.dataset.originalText || 'Create Task';
+                    }
+                }
+            } else {
+                alert('Connection not open. Please wait for reconnection.');
             }
             
-            closeCreateTaskModal();
+            // Do NOT close modal here. Wait for response.
         }
         
         // Navigation

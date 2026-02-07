@@ -149,6 +149,15 @@ class TaskPersistence:
         )
         
         # Restore additional state if present
+        if "total_pnl" in data:
+            task.total_pnl = float(data["total_pnl"])
+        if "total_trades" in data:
+            task.total_trades = int(data["total_trades"])
+        if "win_trades" in data:
+            task.win_trades = int(data["win_trades"])
+        if "error_count" in data:
+            task.error_count = int(data["error_count"])
+            
         if data.get("created_at"):
             try:
                 task.created_at = datetime.fromisoformat(data["created_at"])

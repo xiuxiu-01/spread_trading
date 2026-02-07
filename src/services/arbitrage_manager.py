@@ -3,7 +3,7 @@ Arbitrage Manager - Manages multiple arbitrage tasks.
 """
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Callable, Awaitable, Any
 
 from ..models import ArbitrageTask, ArbitrageStatus, Order
@@ -12,6 +12,7 @@ from ..core import KLineAggregator, EMASpreadStrategy, SignalType
 from ..config import settings
 from ..config.logging_config import get_logger
 from .task_persistence import task_persistence
+from .order_service import OrderService
 
 logger = get_logger("services.arbitrage_manager")
 
@@ -30,6 +31,7 @@ class ArbitrageManager:
     def __init__(self, data_dir=None):
         """Initialize arbitrage manager."""
         self.data_dir = data_dir or settings.data_dir
+        self.order_service = OrderService(self.data_dir)
         
         # Active tasks
         self.tasks: Dict[str, ArbitrageTask] = {}
@@ -126,10 +128,15 @@ class ArbitrageManager:
             # Initialize aggregator
             agg = KLineAggregator(
                 data_dir=self.data_dir,
-                ema_period=task.config.get("emaPeriod", settings.strategy.ema_period)
+                ema_period=task.config.get("emaPeriod", settings.strategy.ema_period),
+                filename=f"history_{task_id}.jsonl"
             )
             agg.load_history()
             self.aggregators[task_id] = agg
+            
+            # Sync recent history
+            if task.config.get("sync_history", True):
+                await self._sync_history(task_id)
             
             # Initialize strategy
             strategy_params = {
@@ -150,12 +157,80 @@ class ArbitrageManager:
             if self._on_status:
                 await self._on_status(task_id, task)
             
+            # Persist state
+            task_persistence.save_tasks(self.tasks)
+            
             return True
             
         except Exception as e:
             logger.error(f"Failed to start task {task_id}: {e}")
             task.set_error(str(e))
             return False
+
+    async def _sync_history(self, task_id: str):
+        """Fetch and sync recent history if market is open."""
+        gateways = self.gateways.get(task_id, {})
+        gw_a = gateways.get("a")
+        gw_b = gateways.get("b")
+        agg = self.aggregators.get(task_id)
+        
+        if not all([gw_a, gw_b, agg]):
+            return
+
+        # Check market open
+        is_open = False
+        if hasattr(gw_a, 'is_market_open'):
+             if asyncio.iscoroutinefunction(gw_a.is_market_open):
+                 is_open = await gw_a.is_market_open()
+             else:
+                 is_open = gw_a.is_market_open()
+        
+        if not is_open:
+             logger.info(f"Market closed, skipping history sync for {task_id}")
+             return
+
+        logger.info(f"Market open, syncing last 1440 bars for {task_id}")
+        
+        try:
+             klines_a, klines_b = await asyncio.gather(
+                 gw_a.get_klines(limit=1440),
+                 gw_b.get_klines(limit=1440)
+             )
+        except Exception as e:
+             logger.error(f"Failed to sync history for {task_id}: {e}")
+             return
+             
+        if not klines_a or not klines_b:
+            logger.warning(f"No history data received for {task_id}")
+            return
+
+        dict_a = {x['time']: x for x in klines_a}
+        dict_b = {x['time']: x for x in klines_b}
+        
+        common_times = sorted(list(set(dict_a.keys()) & set(dict_b.keys())))
+        
+        count = 0 
+        existing_times = set(agg.times)
+        
+        for ts in common_times:
+            # Use local naive time to match system (same as datetime.now())
+            dt = datetime.fromtimestamp(ts)
+            t_iso = dt.isoformat()
+            
+            if t_iso in existing_times:
+                continue
+                
+            b_a = dict_a[ts]
+            b_b = dict_b[ts]
+            
+            # Using close price for spread
+            spread = b_a['close'] - b_b['close']
+            
+            agg.add_bar(t_iso, b_a, b_b, spread, spread)
+            count += 1
+            
+        if count > 0:
+            logger.info(f"Synced {count} new bars for {task_id}")
     
     async def stop_task(self, task_id: str) -> bool:
         """Stop an arbitrage task."""
@@ -183,6 +258,9 @@ class ArbitrageManager:
         
         if self._on_status:
             await self._on_status(task_id, task)
+        
+        # Persist state
+        task_persistence.save_tasks(self.tasks)
         
         return True
     
@@ -293,7 +371,9 @@ class ArbitrageManager:
                                 "avg_spread_sell": avg_sell,
                                 "avg_spread_buy": avg_buy,
                                 "ema": agg.last_ema,
-                                "time": datetime.now().timestamp()
+                                "time": datetime.now().timestamp(),
+                                "mt5_symbol": getattr(tick_a, 'symbol', ''),
+                                "okx_symbol": getattr(tick_b, 'symbol', '')
                             })
                         
                         # Check signals (if auto trade enabled)
@@ -349,13 +429,38 @@ class ArbitrageManager:
             return
         
         try:
-            # Get latest klines
-            klines_a = await gw_a.get_klines(timeframe="1m", limit=1)
-            klines_b = await gw_b.get_klines(timeframe="1m", limit=1)
+            # Check market hours (MT5) before updating
+            # Assuming gw_a is MT5
+            is_open = False
+            if hasattr(gw_a, 'is_market_open'):
+                if asyncio.iscoroutinefunction(gw_a.is_market_open):
+                    is_open = await gw_a.is_market_open()
+                else:
+                    is_open = gw_a.is_market_open()
+            
+            if not is_open:
+                 logger.debug(f"Market closed for {task_id}, skipping kline update")
+                 return
+
+            # Get latest klines (1m)
+            # Fetching 2 bars to ensure we get a CLOSED bar (previous minute)
+            klines_a = await gw_a.get_klines(timeframe="1m", limit=2)
+            klines_b = await gw_b.get_klines(timeframe="1m", limit=2)
             
             if klines_a and klines_b:
-                bar_a = klines_a[-1]
-                bar_b = klines_b[-1]
+                # Use the second to last bar (completed bar)
+                # If we only get 1 bar, it might be the current forming bar
+                if len(klines_a) > 1 and len(klines_b) > 1:
+                    bar_a = klines_a[-2]
+                    bar_b = klines_b[-2]
+                else:
+                    # Fallback to last available if not enough history
+                    bar_a = klines_a[-1]
+                    bar_b = klines_b[-1]
+                
+                # Verify timestamps match (within reasonable tolerance)
+                ts_a = bar_a.get('time') or bar_a.get('ts')
+                ts_b = bar_b.get('time') or bar_b.get('ts')
                 
                 # Get current bid/ask for spread calculation
                 tick_a = await gw_a.get_ticker()
@@ -414,38 +519,124 @@ class ArbitrageManager:
         """Execute a trading signal."""
         task = self.tasks.get(task_id)
         gateways = self.gateways.get(task_id, {})
+        gw_a = gateways.get("a")
+        gw_b = gateways.get("b")
         
-        if not task or not gateways:
+        if not task or not gw_a or not gw_b:
             return
         
-        logger.info(f"Executing signal for {task_id}: {signal.type.value} L{signal.level}")
+        # Config
+        base_volume = float(task.config.get("tradeVolume", 0.01))
+        qty_multiplier = float(task.config.get("qtyMultiplier", 100.0))
+        dry_run = task.config.get("dryRun", True)
+
+        # Logic for reversal
+        if task.has_position and task.direction != signal.type.value:
+            logger.info(f"Reversing position for {task_id}")
+            await self._close_position(task_id)
+            # Update task state after close logic (it is done inside _close_position but let's be safe)
+            if task.has_position:
+                 # If close failed, we might abort or force reset.
+                 # For now, assume _close_position resets the memory state.
+                 pass
+
+        # Calculate volume to add
+        target_level = signal.level
+        current_level = task.current_level
         
-        # TODO: Implement actual order execution
-        # This is a placeholder for the trading logic
+        # Safety: don't trade if already there (in same direction)
+        if current_level >= target_level and task.direction == signal.type.value:
+            return
+
+        levels_to_add = target_level - current_level
+        if levels_to_add <= 0:
+             return
+             
+        trade_volume = base_volume * levels_to_add
+        trade_volume = round(trade_volume, 2)
         
-        task.current_level = signal.level
-        task.direction = signal.type.value
+        # Calculate OKX volume for logging/verification
+        okx_volume = trade_volume * qty_multiplier
         
-        if self._on_trade:
-            await self._on_trade(task_id, {
-                "type": signal.type.value,
-                "level": signal.level,
-                "reason": signal.reason
-            })
+        logger.info(f"Executing signal {task_id}: {signal.type.value} L{target_level} (+{levels_to_add} lvls). Volumes: MT5={trade_volume}, OKX={okx_volume} (Mult={qty_multiplier})")
+        
+        result = await self.order_service.execute_arbitrage_orders(
+            gateway_a=gw_a,
+            gateway_b=gw_b,
+            direction=signal.type.value,
+            volume=trade_volume,
+            dry_run=dry_run,
+            qty_multiplier=qty_multiplier
+        )
+        
+        if result["success"]:
+            # Recalculate PnL and trades count only on closing/full cycle
+            # For now, just mark last_trade_at
+            task.last_trade_at = datetime.now()
+            
+            task.current_level = target_level
+            task.direction = signal.type.value
+            
+            # Persist task state (important for level tracking)
+            task_persistence.save_tasks(self.tasks)
+            
+            if self._on_trade:
+                await self._on_trade(task_id, {
+                    "type": signal.type.value,
+                    "level": signal.level,
+                    "reason": signal.reason,
+                    "result": result
+                })
+        else:
+            logger.error(f"Trade execution failed for {task_id}: {result.get('error')}")
     
     async def _close_position(self, task_id: str):
         """Close all positions for a task."""
         task = self.tasks.get(task_id)
-        if not task:
+        gateways = self.gateways.get(task_id, {})
+        gw_a = gateways.get("a")
+        gw_b = gateways.get("b")
+        
+        if not task or not gw_a or not gw_b:
             return
         
-        logger.info(f"Closing position for {task_id}")
+        if not task.has_position:
+            return
         
-        # TODO: Implement actual position closing
+        logger.info(f"Closing position for {task_id}: {task.direction} L{task.current_level}")
         
+        base_volume = float(task.config.get("tradeVolume", 0.01))
+        qty_multiplier = float(task.config.get("qtyMultiplier", 100.0))
+        dry_run = task.config.get("dryRun", True)
+
+        # Calculate total volume pending
+        total_volume = base_volume * task.current_level
+        total_volume = round(total_volume, 2)
+        
+        result = await self.order_service.close_arbitrage_position(
+            gateway_a=gw_a,
+            gateway_b=gw_b,
+            direction=task.direction,
+            volume=total_volume,
+            dry_run=dry_run,
+            qty_multiplier=qty_multiplier
+        )
+        
+        # Reset state regardless of result to avoid stuck state (safest for now)
         task.current_level = 0
         task.direction = ""
         task.record_trade(0, True)  # Placeholder PnL
+        
+        # Persist updated state
+        task_persistence.save_tasks(self.tasks)
+        
+        if self._on_trade:
+             await self._on_trade(task_id, {
+                 "type": "close",
+                 "level": 0,
+                 "reason": "signal_close",
+                 "result": result
+             })
     
     # --- Callbacks ---
     

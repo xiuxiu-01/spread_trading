@@ -1283,19 +1283,32 @@
             console.log('Creating task:', payload);
             
             // Show loading state
-            const createBtn = document.querySelector('#newTaskModal .btn-success');
-            const originalText = createBtn.textContent;
-            createBtn.textContent = '⏳ Verifying...';
-            createBtn.disabled = true;
+            const createBtn = document.querySelector('#newTaskModal .btn-primary');
+            let originalText = 'Create Task';
+            if (createBtn) {
+                originalText = createBtn.textContent;
+                createBtn.textContent = '⏳ Verifying...';
+                createBtn.disabled = true;
+            }
             
             if (ws && ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({ type: 'create_task', payload }));
+            } else {
+                 alert("WebSocket not connected. Please refresh or wait.");
+                 if (createBtn) {
+                    createBtn.textContent = originalText;
+                    createBtn.disabled = false;
+                 }
+                 return;
             }
             
             // Re-enable button after timeout (in case of no response)
             setTimeout(() => {
-                createBtn.textContent = originalText;
-                createBtn.disabled = false;
+                const btn = document.querySelector('#newTaskModal .btn-primary');
+                if (btn && btn.disabled) {
+                     btn.textContent = originalText;
+                     btn.disabled = false;
+                }
             }, 10000);
         }
         
@@ -1304,9 +1317,9 @@
             closeNewTaskModal();
             
             // Re-enable button
-            const createBtn = document.querySelector('#newTaskModal .btn-success');
+            const createBtn = document.querySelector('#newTaskModal .btn-primary');
             if (createBtn) {
-                createBtn.textContent = '✅ Create Task';
+                createBtn.textContent = 'Create Task';
                 createBtn.disabled = false;
             }
             
@@ -1327,12 +1340,12 @@
         
         function handleTaskCreationFailed(data) {
             // Task creation failed - show detailed error
-            closeNewTaskModal();
+            // closeNewTaskModal(); // Keep it open for user to fix inputs
             
             // Re-enable button
-            const createBtn = document.querySelector('#newTaskModal .btn-success');
+            const createBtn = document.querySelector('#newTaskModal .btn-primary');
             if (createBtn) {
-                createBtn.textContent = '✅ Create Task';
+                createBtn.textContent = 'Create Task';
                 createBtn.disabled = false;
             }
             

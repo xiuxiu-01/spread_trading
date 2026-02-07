@@ -642,8 +642,13 @@
 <body>
     <header>
         <div class="header-left">
-            <h1 id="pageTitle">Arbitrage Monitor</h1>
-            <span id="taskInfo" style="font-size: 0.8rem; color: var(--text-secondary);"></span>
+            <h1>Arbitrage Monitor</h1>
+            <div style="margin-left: 15px;">
+                <select id="taskSelector" style="background:#1f2428; border:1px solid #30363d; color:#c9d1d9; padding:4px 8px; border-radius:4px; font-size: 0.9rem;">
+                    <option value="mt5-okx-xau" selected>Gold (XAU)</option>
+                    <option value="mt5-okx-xag">Silver (XAG)</option>
+                </select>
+            </div>
             <a href="admin.html" class="admin-link">📊 Admin Dashboard</a>
         </div>
         <div id="connectionStatus" class="status disconnected">未连接</div>
@@ -666,14 +671,14 @@
                 <h3>账户信息</h3>
                 <div class="account-grid">
                     <div class="account-card">
-                        <strong style="color: #4caf50;">MT5 (XAU)</strong>
+                        <strong style="color: #4caf50;">MT5</strong>
                         净值: <span id="mt5-equity">--</span><br/>
-                        净手数: <span id="mt5-net" style="font-weight: bold;">0.00</span>
+                        <span>Net Lots:</span> <span id="mt5-net" style="font-weight: bold;">0.00</span>
                     </div>
                     <div class="account-card">
-                        <strong style="color: #ff9800;">OKX (XAU)</strong>
+                        <strong style="color: #ff9800;">OKX</strong>
                         USDT余额: <span id="okx-balance">--</span><br/>
-                        净手数: <span id="okx-net" style="font-weight: bold;">0.00</span>
+                        <span>Eq Lots:</span> <span id="okx-net" style="font-weight: bold;">0.00</span>
                     </div>
                 </div>
             </div>
@@ -900,20 +905,37 @@
 
         // Account rendering
         function renderAccount(accountState) {
-            if (!accountState) return;
+            try {
+                // Debug log
+                // addLog(`Account Debug: ${JSON.stringify(accountState)}`, 'info'); 
+                
+                if (!accountState) return;
 
-            const mt5Bal = accountState.balance?.mt5 || 0;
-            const mt5Net = accountState.net?.mt5 || 0;
-            const okxBal = accountState.balance?.okx || 0;
-            const okxNet = accountState.net?.okx || 0;
-            
-            document.getElementById('mt5-equity').textContent = mt5Bal.toFixed(2);
-            document.getElementById('mt5-net').textContent = mt5Net.toFixed(2);
-            document.getElementById('mt5-net').style.color = mt5Net > 0 ? 'var(--green)' : (mt5Net < 0 ? 'var(--red)' : '#d29922');
-            
-            document.getElementById('okx-balance').textContent = okxBal.toFixed(4);
-            document.getElementById('okx-net').textContent = okxNet.toFixed(2);
-            document.getElementById('okx-net').style.color = okxNet > 0 ? 'var(--green)' : (okxNet < 0 ? 'var(--red)' : '#d29922');
+                const mt5Bal = accountState.balance?.mt5 || 0;
+                const mt5Net = accountState.net?.mt5 || 0;
+                const okxBal = accountState.balance?.okx || 0;
+                const okxNet = accountState.net?.okx || 0;
+                
+                const elMt5Eq = document.getElementById('mt5-equity');
+                const elMt5Net = document.getElementById('mt5-net');
+                const elOkxBal = document.getElementById('okx-balance');
+                const elOkxNet = document.getElementById('okx-net');
+
+                if (elMt5Eq) elMt5Eq.textContent = mt5Bal.toFixed(2);
+                if (elMt5Net) {
+                    elMt5Net.textContent = mt5Net.toFixed(2);
+                    elMt5Net.style.color = mt5Net > 0 ? 'var(--green)' : (mt5Net < 0 ? 'var(--red)' : '#d29922');
+                }
+                
+                if (elOkxBal) elOkxBal.textContent = okxBal.toFixed(4);
+                if (elOkxNet) {
+                    elOkxNet.textContent = okxNet.toFixed(2);
+                    elOkxNet.style.color = okxNet > 0 ? 'var(--green)' : (okxNet < 0 ? 'var(--red)' : '#d29922');
+                }
+            } catch (e) {
+                console.error("Render Account Error", e);
+                addLog(`Render Account Error: ${e.message}`, 'error');
+            }
         }
 
         // Charts setup
@@ -1077,12 +1099,14 @@
             const isFile = window.location.protocol === 'file:';
             const isHttps = window.location.protocol === 'https:';
             const scheme = isHttps ? 'wss' : 'ws';
+            
+            // Backend defaults to port 8766
+            const defaultPort = '8766';
+            const hostname = isFile ? 'localhost' : window.location.hostname;
 
-            // 固定使用 8766 端口连接 WebSocket 服务器
-            const wsPort = 8766;
             const host = wsHostOverride
                 ? wsHostOverride
-                : (isFile ? 'localhost' : window.location.hostname) + ':' + wsPort;
+                : `${hostname}:${defaultPort}`;
 
             const url = wsOverride || `${scheme}://${host}/ws`;
             
@@ -1102,6 +1126,13 @@
                 statusEl.textContent = '已连接';
                 statusEl.className = 'status connected';
                 addLog('WebSocket 已连接', 'success');
+                
+                // Send initial requests
+                ws.send(JSON.stringify({ type: "get_history", task_id: currentTask }));
+                ws.send(JSON.stringify({ type: "get_account" }));
+                ws.send(JSON.stringify({ type: "get_params" }));
+                ws.send(JSON.stringify({ type: "get_order_logs", limit: 50 }));
+
                 if (reconnectTimer) {
                     clearTimeout(reconnectTimer);
                     reconnectTimer = null;
@@ -1140,6 +1171,33 @@
 
         const paramsForm = document.getElementById('paramsForm');
         let currentParams = {};
+        
+        // Task Management
+        let currentTask = 'mt5-okx-xau';
+        const taskSelector = document.getElementById('taskSelector');
+        
+        taskSelector.addEventListener('change', (e) => {
+            currentTask = e.target.value;
+            addLog(`切换任务至: ${currentTask}`, 'info');
+            
+            // Clear charts
+            if (mt5Series) mt5Series.setData([]);
+            if (okxSeries) okxSeries.setData([]);
+            if (spreadSellSeries) spreadSellSeries.setData([]);
+            if (spreadBuySeries) spreadBuySeries.setData([]);
+            if (emaSellSeries) emaSellSeries.setData([]);
+            if (emaBuySeries) emaBuySeries.setData([]);
+            
+            // Reset state
+            globalSpreadData = [];
+            globalEmaData = [];
+            
+            // Refresh
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: "get_history", task_id: currentTask }));
+            }
+        });
+
         let markers = [];
         let globalSpreadData = [];
         let globalEmaData = [];
@@ -1150,9 +1208,16 @@
         let emaHistoryData = [];
 
         function handleMessage(msg) {
+            // Task Filtering
+            // Allow messages with no task_id (global) or matching task_id
+            if (msg.task_id && msg.task_id !== currentTask) {
+                return; 
+            }
+
             if (msg.type === 'params') {
                 updateParamsUI(msg.payload);
             } else if (msg.type === 'account') {
+                // addLog('Received account update', 'info');
                 renderAccount(msg.payload);
             } else if (msg.type === 'bar') {
                 updateCharts(msg.payload);
@@ -1273,6 +1338,24 @@
         }
         
         function updateRealtimeQuotes(tick) {
+            // Debug: Check consistency
+            // console.log("Tick:", tick); 
+            
+            // Verify symbol if provided
+            if (tick.mt5_symbol) {
+               // Update Labels dynamically
+               const mt5Label = document.querySelector('.quote-card strong[style*="#4caf50"]');
+               if (mt5Label && !mt5Label.textContent.includes(tick.mt5_symbol)) {
+                   mt5Label.textContent = `MT5 (${tick.mt5_symbol})`;
+               }
+            }
+            if (tick.okx_symbol) {
+                const okxLabel = document.querySelector('.quote-card strong[style*="#ff9800"]');
+                if (okxLabel && !okxLabel.textContent.includes(tick.okx_symbol)) {
+                    okxLabel.textContent = `OKX (${tick.okx_symbol})`;
+                }
+            }
+
             if (tick.mt5_bid !== null) {
                 document.getElementById('rt-mt5-bid').textContent = tick.mt5_bid.toFixed(2);
             }
@@ -1736,41 +1819,12 @@
             
         }
 
-        // =================================================================
-        // Task Info from URL Parameters
-        // =================================================================
-        const SYMBOL_ICONS = {
-            'XAUUSD': '🥇',
-            'XAGUSD': '🥈',
-            'BTCUSD': '₿',
-            'ETHUSD': 'Ξ'
-        };
-        
-        function initTaskFromUrl() {
-            const qs = new URLSearchParams(window.location.search);
-            const taskId = qs.get('task');
-            const symbol = qs.get('symbol');
-            const exA = qs.get('exA');
-            const exB = qs.get('exB');
-            const symA = qs.get('symA');
-            const symB = qs.get('symB');
-            
-            if (taskId) {
-                const icon = SYMBOL_ICONS[symbol] || '';
-                document.getElementById('pageTitle').textContent = `${icon} ${symbol || 'Arbitrage'} Monitor`;
-                document.title = `${symbol || 'Arbitrage'} - ${exA?.toUpperCase() || ''} ↔ ${exB?.toUpperCase() || ''}`;
-                
-                const taskInfo = document.getElementById('taskInfo');
-                if (taskInfo && exA && exB) {
-                    taskInfo.innerHTML = `<strong>${exA.toUpperCase()}</strong>: ${symA || symbol} ↔ <strong>${exB.toUpperCase()}</strong>: ${symB || symbol}`;
-                }
-                
-                addLog(`任务: ${taskId}`, 'info');
-                addLog(`品种: ${symbol} | 交易所: ${exA?.toUpperCase()} ↔ ${exB?.toUpperCase()}`, 'info');
+        // Account Polling
+        setInterval(() => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: "get_account" }));
             }
-        }
-        
-        initTaskFromUrl();
+        }, 3000);
 
         // Start
         addLog('套利监控已启动', 'info');

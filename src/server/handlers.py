@@ -59,6 +59,7 @@ class MessageHandler:
             "refresh_history": self._handle_get_history,
             "get_orders": self._handle_get_orders,
             "get_order_logs": self._handle_get_orders,
+            "get_account": self._handle_get_account,
             "get_dashboard": self._handle_get_dashboard,
             "get_symbols": self._handle_get_symbols,
             "get_exchanges": self._handle_get_exchanges,
@@ -140,23 +141,195 @@ class MessageHandler:
     
     async def _handle_get_history(self, websocket: Any, payload: Dict):
         """Handle history request."""
-        history = self.aggregator.get_history_payload()
+        # Check if task_id is provided
+        task_id = payload.get("task_id")
         
-        await self.send(websocket, {
-            "type": "history",
-            "payload": history
-        })
+        if task_id:
+            # Get specific task aggregator
+            agg = self.manager.aggregators.get(task_id)
+            if agg:
+                history = agg.get_history_payload()
+                await self.send(websocket, {
+                    "type": "history",
+                    "task_id": task_id,
+                    "payload": history
+                })
+            else:
+                await self.send(websocket, {
+                    "type": "error",
+                    "payload": {"message": f"Aggregator not found for {task_id}"}
+                })
+        else:
+            # Fallback or get all? 
+            # If no task_id, try to send history for the default global aggregator (if used)
+            # Or iterate all active tasks and send multiple history messages
+            
+            # Sending global aggregator history (Mainly for single-task legacy support)
+            history = self.aggregator.get_history_payload()
+            await self.send(websocket, {
+                "type": "history",
+                "payload": history
+            })
+            
+            # Also send individual task histories
+            for t_id, agg in self.manager.aggregators.items():
+                hist = agg.get_history_payload()
+                await self.send(websocket, {
+                    "type": "history",
+                    "task_id": t_id,
+                    "payload": hist
+                })
     
     async def _handle_get_orders(self, websocket: Any, payload: Dict):
         """Handle order history request."""
-        # Get from manager or order service
-        orders = []
+        # Get from order service
+        orders = self.manager.order_service.get_recent_orders(limit=50)
         
         await self.send(websocket, {
             "type": "order_logs",
             "payload": orders
         })
-    
+        
+    async def _handle_get_account(self, websocket: Any, payload: Dict):
+        """Handle access account info via gateways."""
+        accounts = {}
+        positions = {}
+        
+        # Iterate all tasks to find unique gateways
+        all_tasks = self.manager.get_all_tasks()
+        
+        for task in all_tasks:
+            gateways = self.manager.gateways.get(task.task_id, {})
+            
+            # Gateway A (MT5)
+            gw_a = gateways.get("a")
+            if gw_a:
+                key = "mt5"
+                # Get Balance
+                if key not in accounts:
+                    try:
+                        if hasattr(gw_a, 'get_balance'):
+                             info = await gw_a.get_balance()
+                             accounts[key] = info
+                        elif hasattr(gw_a, 'get_account_info'):
+                             info = await gw_a.get_account_info()
+                             accounts[key] = info
+                    except Exception as e:
+                        logger.error(f"Failed to get {key} account: {e}")
+                
+                # Get Position for this task if needed, but currently we aggregate per exchange
+                # MT5 usually returns net position per symbol.
+                try:
+                    # Specific to MT5 handling logic
+                    pass 
+                except:
+                    pass
+
+            # Gateway B (OKX)
+            gw_b = gateways.get("b")
+            if gw_b:
+                key = "okx"
+                if key not in accounts:
+                    try:
+                        bal = await gw_b.get_balance()
+                        accounts[key] = bal
+                    except Exception as e:
+                        logger.error(f"Failed to get {key} account: {e}")
+
+        # Current logic for NET LOTS (Position)
+        # We need to fetch current Positions from the Manager's State / Orders
+        # Or fetch directly from Gateways if possible
+        
+        # MT5 Position (Total across all tasks for simplicity, or specific if needed)
+        # BUT frontend expects "mt5" and "okx" keys in 'net' object.
+        
+        mt5_net_lots = 0.0
+        okx_net_lots = 0.0
+        
+        # Calculate from active tasks
+        # Removed broken loop that used get_position_size
+        
+        # Fetch actual positions from gateways to ensure accuracy (esp if restarted)
+        for task in all_tasks:
+            gateways = self.manager.gateways.get(task.task_id, {})
+            gw_a = gateways.get("a") # MT5
+            gw_b = gateways.get("b") # OKX
+            
+            if gw_a:
+                try: 
+                    # MT5 Gateway get_position uses self.symbol, takes no args
+                    pos = await gw_a.get_position()
+                    if pos: 
+                        # MT5 Position volume is already in Lots
+                        # Check side
+                        sign = 1 if pos.side.value == "long" else -1
+                        mt5_net_lots += (pos.volume * sign)
+                except Exception as e:
+                    logger.debug(f"MT5 get_pos error: {e}")
+
+            if gw_b:
+                try:
+                    pos = await gw_b.get_position()
+                    if pos and pos.volume > 0:
+                        # OKX returns Number of Contracts (e.g. 100)
+                        # We need to convert to Lots if user wants alignment
+                        # Multiplier e.g. 100,000
+                        sign = 1 if pos.side.value == "long" else -1
+                        contracts = pos.volume
+                        
+                        multiplier = task.config.get("qtyMultiplier", 1.0)
+                        if multiplier > 0:
+                             # Convert contracts to lots?
+                             # Or just display raw contracts?
+                             # User said "okx need to align with mt5 lots by contract multiplier"
+                             # This implies: Display = Contracts / Multiplier ? NO.
+                             # MT5 Lot = 100oz. OKX Contract = 0.01oz.
+                             # Multiplier = 100 / 0.01 = 10,000.
+                             # If I have 1 MT5 Lot, I need 10,000 OKX Contracts to be hedged.
+                             # If I have 10,000 OKX Contracts, I want to see "1.0" (Aligned)?
+                             # Or "10,000" (Aligned means correct hedge ratio)?
+                             
+                             # Usually "Aligned" means the hedging logic is correct.
+                             # But "okx余额看不见... okx需要和mt5的手数按合约倍数对齐"
+                             # "OKX Balance invisible, and I am not looking at PnL, I want original Lots, and OKX needs to align with MT5 lots by multiplier"
+                             
+                             # I will calculate Equivalent Lots for OKX
+                             okx_lots_equivalent = contracts / multiplier
+                             
+                             # Wait, if multiplier is 100,000 (from main.py for XAU)
+                             # And I have 1 MT5 Lot (100oz).
+                             # OKX Contract is 0.001oz (actually check main.py commentary)
+                             # "Multiplier = 100 / 0.001 = 100,000"
+                             # So 1 Lot MT5 = 100,000 Contracts.
+                             # If I display 100,000, it's huge. 
+                             # If user wants to see "1.0", I should divide by 100,000.
+                             # BUT, if I display 0.00001 it's also weird if the math is wrong.
+                             
+                             # Let's assume user wants to see the "Lots Equivalent"
+                             okx_net_lots += (okx_lots_equivalent * sign)
+                        else:
+                             okx_net_lots += (contracts * sign)
+
+                except Exception as e:
+                    logger.debug(f"OKX get_pos error: {e}")
+
+        # Format for frontend
+        formatted_payload = {
+            "balance": {
+                "mt5": accounts.get("mt5", {}).get("equity", 0),  
+                "okx": accounts.get("okx", {}).get("total", 0)
+            },
+            "net": {
+                "mt5": mt5_net_lots,
+                "okx": okx_net_lots
+            }
+        }
+        
+        await self.send(websocket, {
+            "type": "account",
+            "payload": formatted_payload
+        })
+
     async def _handle_get_dashboard(self, websocket: Any, payload: Dict):
         """Handle dashboard data request."""
         dashboard = self.manager.get_dashboard_data()
