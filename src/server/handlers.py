@@ -387,20 +387,44 @@ class MessageHandler:
                     if pos and pos.volume > 0:
                         # OKX returns Number of Contracts (e.g. 100)
                         # We need to convert to Lots if user wants alignment
-                        # Multiplier e.g. 100,000
+                        # Multiplier e.g. 100,000 for XAU
                         sign = 1 if pos.side.value == "long" else -1
                         contracts = pos.volume
                         
-                        multiplier = task.config.get("qtyMultiplier", 1.0)
+                        # Default to 100000 for XAU-like symbols
+                        multiplier = task.config.get("qtyMultiplier", 100000.0)
                         if multiplier > 0:
-                             # Display Equivalent Lots
-                             okx_net_lots += (contracts / multiplier * sign)
+                             # Display Equivalent Lots = contracts / multiplier
+                             okx_lots_equivalent = contracts / multiplier
+                             okx_net_lots += (okx_lots_equivalent * sign)
+                             logger.debug(f"OKX Position: {contracts} contracts / {multiplier} = {okx_lots_equivalent} lots")
                         else:
                              okx_net_lots += (contracts * sign)
 
                 except Exception as e:
                     logger.debug(f"OKX get_pos error: {e}")
 
+        # Get strategy position from target task (or first running task)
+        position_info = {"level": 0, "direction": ""}
+        
+        # If specific task requested, use that task's position
+        if requested_task_id:
+            task = self.manager.tasks.get(requested_task_id)
+            if task:
+                position_info = {
+                    "level": task.current_level,
+                    "direction": task.direction
+                }
+        else:
+            # Otherwise find first running task with position
+            for task_id, task in self.manager.tasks.items():
+                if task.status.value == "running" and task.current_level > 0:
+                    position_info = {
+                        "level": task.current_level,
+                        "direction": task.direction
+                    }
+                    break
+        
         # Format for frontend
         formatted_payload = {
             "balance": {
@@ -410,7 +434,8 @@ class MessageHandler:
             "net": {
                 "mt5": mt5_net_lots,
                 "okx": okx_net_lots
-            }
+            },
+            "position": position_info
         }
         
         await self.send(websocket, {
@@ -698,7 +723,8 @@ class MessageHandler:
                 exchange_b=exchange_b,
                 symbol_a=symbol_a,
                 symbol_b=symbol_b,
-                config=config
+                config=config,
+                name=payload.get("name", "")
             )
             
             # Step 4: Persist to disk

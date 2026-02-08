@@ -97,7 +97,8 @@ class ArbitrageManager:
         exchange_b: str,
         symbol_a: str,
         symbol_b: str,
-        config: Optional[Dict[str, Any]] = None
+        config: Optional[Dict[str, Any]] = None,
+        name: str = ""
     ) -> ArbitrageTask:
         """
         Create a new arbitrage task.
@@ -109,6 +110,7 @@ class ArbitrageManager:
             symbol_a: Symbol on first exchange
             symbol_b: Symbol on second exchange
             config: Strategy configuration
+            name: Task name (optional)
         
         Returns:
             Created ArbitrageTask
@@ -118,6 +120,7 @@ class ArbitrageManager:
         
         task = ArbitrageTask(
             task_id=task_id,
+            name=name,
             exchange_a=exchange_a,
             exchange_b=exchange_b,
             symbol_a=symbol_a,
@@ -565,26 +568,46 @@ class ArbitrageManager:
         task = self.tasks.get(task_id)
         strategy = self.strategies.get(task_id)
         agg = self.aggregators.get(task_id)
+        gateways = self.gateways.get(task_id, {})
+        gw_a = gateways.get("a")
         
         if not all([task, strategy, agg]):
             return
         
-        ema = agg.last_ema
+        # Check if dry run mode (skip market hours check in dry run)
+        dry_run = task.config.get("dryRun", True)
         
-        # Check take profit first
-        if task.has_position:
-            if strategy.check_take_profit(
-                spread_sell, spread_buy, ema,
-                task.current_level, task.direction
-            ):
-                await self._close_position(task_id)
+        # Check market hours before trading (skip in dry run mode)
+        if not dry_run and gw_a and hasattr(gw_a, 'is_market_open'):
+            if asyncio.iscoroutinefunction(gw_a.is_market_open):
+                is_open = await gw_a.is_market_open()
+            else:
+                is_open = gw_a.is_market_open()
+            
+            if not is_open:
+                # Market is closed, skip signal check (real trading only)
                 return
         
+        ema = agg.last_ema
+        
+        # Check trade cooldown before any auto action
+        # Minimum 60 seconds between auto trades to prevent signal confusion
+        MIN_TRADE_INTERVAL = 60.0  # seconds
+        if task.last_trade_at:
+            elapsed = (datetime.now() - task.last_trade_at).total_seconds()
+            if elapsed < MIN_TRADE_INTERVAL:
+                # Still in cooldown, skip all auto signals
+                return
+        
+        # Note: Take profit is disabled - manual close only
+        
         # Check entry/add-on signals
+        logger.debug(f"[{task_id}] check_signal: level={task.current_level}, dir='{task.direction}', ema={ema:.2f}, spread_buy={spread_buy:.2f}, spread_sell={spread_sell:.2f}")
         signal = strategy.check_signal(
             spread_sell, spread_buy, ema,
             task.current_level, task.direction
         )
+        logger.debug(f"[{task_id}] signal result: type={signal.type}, level={signal.level}, reason={signal.reason}")
         
         if signal.is_valid:
             await self._execute_signal(task_id, signal)
@@ -603,36 +626,46 @@ class ArbitrageManager:
         base_volume = float(task.config.get("tradeVolume", 0.01))
         qty_multiplier = float(task.config.get("qtyMultiplier", 100.0))
         dry_run = task.config.get("dryRun", True)
+        
+        # Note: Cooldown is now checked in _check_signals before calling this method
 
-        # Logic for reversal
-        if task.has_position and task.direction != signal.type.value:
-            logger.info(f"Reversing position for {task_id}")
-            await self._close_position(task_id)
-            # Update task state after close logic (it is done inside _close_position but let's be safe)
-            if task.has_position:
-                 # If close failed, we might abort or force reset.
-                 # For now, assume _close_position resets the memory state.
-                 pass
-
-        # Calculate volume to add
+        # Track volumes for logging
+        close_volume = 0.0
+        open_volume = 0.0
+        is_reversal = False
+        
         target_level = signal.level
-        current_level = task.current_level
         
-        # Safety: don't trade if already there (in same direction)
-        if current_level >= target_level and task.direction == signal.type.value:
-            return
-
-        levels_to_add = target_level - current_level
-        if levels_to_add <= 0:
-             return
-             
-        trade_volume = base_volume * levels_to_add
-        trade_volume = round(trade_volume, 2)
+        # Check if this is a reversal (direction change)
+        if task.has_position and task.direction != signal.type.value:
+            # Reversal: need to close current position + open new position
+            # Gateway will handle "close opposite first, then open new" automatically
+            close_volume = base_volume * task.current_level
+            open_volume = base_volume * target_level
+            trade_volume = round(close_volume + open_volume, 2)
+            is_reversal = True
+            logger.info(f"Reversing position for {task_id}: {task.direction} L{task.current_level} -> {signal.type.value} L{target_level}")
+            logger.info(f"  Total volume: {trade_volume} (close {close_volume} + open {open_volume})")
+        else:
+            # Same direction: just add to position
+            current_level = task.current_level
+            
+            # Safety: don't trade if already at target level
+            if current_level >= target_level and task.direction == signal.type.value:
+                return
+            
+            levels_to_add = target_level - current_level
+            if levels_to_add <= 0:
+                return
+            
+            open_volume = base_volume * levels_to_add
+            trade_volume = round(open_volume, 2)
+            logger.info(f"Adding to position for {task_id}: L{current_level} -> L{target_level} (+{levels_to_add} levels)")
         
-        # Calculate OKX volume for logging/verification
+        # Calculate OKX volume for logging
         okx_volume = trade_volume * qty_multiplier
         
-        logger.info(f"Executing signal {task_id}: {signal.type.value} L{target_level} (+{levels_to_add} lvls). Volumes: MT5={trade_volume}, OKX={okx_volume} (Mult={qty_multiplier})")
+        logger.info(f"Executing signal {task_id}: {signal.type.value} L{target_level}. Volumes: MT5={trade_volume}, OKX={okx_volume}")
         
         result = await self.order_service.execute_arbitrage_orders(
             gateway_a=gw_a,
@@ -654,7 +687,17 @@ class ArbitrageManager:
             # Persist task state (important for level tracking)
             task_persistence.save_tasks(self.tasks)
             
+            # Get current tick prices for complete logging
+            tick_a = gw_a.last_tick if hasattr(gw_a, 'last_tick') and gw_a.last_tick else None
+            tick_b = gw_b.last_tick if hasattr(gw_b, 'last_tick') and gw_b.last_tick else None
+            
             # Construct Composite Trade Log for Auto Trade
+            # Build reason string with details
+            if is_reversal:
+                reason_str = f"自动反转: 平{close_volume}手 + 开{open_volume}手 | {signal.reason}"
+            else:
+                reason_str = signal.reason
+            
             trade_record = {
                  "task_id": task_id,
                  "ts": datetime.now(timezone.utc).isoformat(),
@@ -664,15 +707,19 @@ class ArbitrageManager:
                  "vol": trade_volume,
                  "status": "filled_all",
                  "prices": {
-                     "spread_sell": signal.spread if hasattr(signal, 'spread') else 0,
-                     # Add other prices if available in signal object
+                     "spread_sell": getattr(signal, 'spread_sell', 0) or signal.spread,
+                     "spread_buy": getattr(signal, 'spread_buy', 0),
+                     "mt5_bid": tick_a.bid if tick_a else 0,
+                     "mt5_ask": tick_a.ask if tick_a else 0,
+                     "okx_bid": tick_b.bid if tick_b else 0,
+                     "okx_ask": tick_b.ask if tick_b else 0,
                  },
                  "ema": signal.ema if hasattr(signal, 'ema') else 0,
                  "signal": {
-                     "trigger": "auto",
+                     "trigger": "auto_reversal" if is_reversal else "auto",
                      "action": signal.type.value,
                      "level": signal.level,
-                     "reason": signal.reason,
+                     "reason": reason_str,
                      "threshold": signal.threshold if hasattr(signal, 'threshold') else 0
                  },
                  "mt5_result": result.get("order_a", {}),
@@ -695,6 +742,13 @@ class ArbitrageManager:
         task = self.tasks.get(task_id)
         if not task:
             return {"success": False, "error": "Task not found"}
+        
+        # Trade cooldown check - prevent orders too fast
+        MIN_TRADE_INTERVAL = 1.0  # 1 second for manual trades
+        if task.last_trade_at:
+            elapsed = (datetime.now() - task.last_trade_at).total_seconds()
+            if elapsed < MIN_TRADE_INTERVAL:
+                return {"success": False, "error": f"Trade too fast, wait {MIN_TRADE_INTERVAL - elapsed:.1f}s"}
             
         gateways = self.gateways.get(task_id, {})
         gw_a = gateways.get("a")
@@ -708,14 +762,26 @@ class ArbitrageManager:
         qty_multiplier = float(task.config.get("qtyMultiplier", 100.0))
         dry_run = task.config.get("dryRun", True)
         
-        trade_volume = volume if volume else base_volume
+        open_volume = volume if volume else base_volume
         
-        # Check Reversal Logic (Simplistic: if opposite, close all first)
+        # Log current state for debugging
+        logger.info(f"Manual trade check: has_position={task.has_position}, current_dir='{task.direction}', current_level={task.current_level}, requested_dir='{direction}'")
+        
+        # Track volumes for logging
+        close_volume = 0.0
+        is_reversal = False
+        
+        # Check if this is a reversal (direction change)
+        # Gateway will handle "close opposite first, then open new" automatically
         if task.has_position and task.direction != direction:
-             logger.info(f"Manual trade reversal: Closing {task.direction} first")
-             await self._close_position(task_id)
-        
-        logger.info(f"Executing MANUAL {direction} for {task_id}. Vol: {trade_volume}")
+             close_volume = base_volume * task.current_level
+             trade_volume = round(close_volume + open_volume, 2)
+             is_reversal = True
+             logger.info(f"Manual reversal: {task.direction} L{task.current_level} -> {direction}")
+             logger.info(f"  Total volume: {trade_volume} (close {close_volume} + open {open_volume})")
+        else:
+             trade_volume = open_volume
+             logger.info(f"Manual trade: {direction} {trade_volume} lots")
         
         result = await self.order_service.execute_arbitrage_orders(
             gateway_a=gw_a,
@@ -727,11 +793,16 @@ class ArbitrageManager:
         )
         
         if result["success"]:
-             # Update Task State manually
-             # We assume manual trade adds 1 "level" worth of risk, or sets to level 1 if flat
-             if task.direction == direction:
+             # Update Task State
+             # For reversal: set to level 1 in new direction
+             # For same direction: increment level
+             if is_reversal:
+                 task.direction = direction
+                 task.current_level = 1
+             elif task.direction == direction:
                  task.current_level += 1
              else:
+                 # First position
                  task.direction = direction
                  task.current_level = 1
                  
@@ -759,6 +830,12 @@ class ArbitrageManager:
                  current_prices["spread_sell"] = 0
                  current_prices["spread_buy"] = 0
              
+             # Build reason string with details
+             if is_reversal:
+                 reason_str = f"手动反转: 平{close_volume}手 + 开{open_volume}手"
+             else:
+                 reason_str = "手动交易"
+             
              trade_record = {
                  "task_id": task_id,
                  "ts": datetime.now(timezone.utc).isoformat(),
@@ -770,10 +847,10 @@ class ArbitrageManager:
                  "prices": current_prices,
                  "ema": 0, # Placeholder
                  "signal": {
-                     "trigger": "manual",
+                     "trigger": "manual_reversal" if is_reversal else "manual",
                      "action": direction,
                      "level": task.current_level,
-                     "reason": "Manual Trade"
+                     "reason": reason_str
                  },
                  "mt5_result": result.get("order_a", {}),
                  "okx_result": result.get("order_b", {}),

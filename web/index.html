@@ -680,6 +680,12 @@
                         USDT余额: <span id="okx-balance">--</span><br/>
                         <span>Eq Lots:</span> <span id="okx-net" style="font-weight: bold;">0.00</span>
                     </div>
+                    <div class="account-card">
+                        <strong style="color: #58a6ff;">策略仓位</strong>
+                        <div style="font-size: 1.5rem; font-weight: bold; margin-top: 5px;">
+                            <span id="strategy-position" style="color: var(--text-secondary);">Flat</span>
+                        </div>
+                    </div>
                 </div>
             </div>
 
@@ -808,14 +814,9 @@
 
         <!-- Orders Tab -->
         <div id="tab-orders" class="tab-content">
-            <div class="panel">
-                <h3>订单历史 (当前会话)</h3>
-                <div id="orderList" class="order-list"></div>
-            </div>
-            
             <!-- Order Logs Panel -->
             <div class="panel">
-                <h3>历史订单日志 (近50条)</h3>
+                <h3>订单日志 (近50条)</h3>
                 <div class="btn-row" style="margin-bottom: 10px;">
                     <button id="refreshOrderLogs" class="btn-blue">刷新订单日志</button>
                 </div>
@@ -900,6 +901,13 @@
                         spreadBuyChart.timeScale().fitContent();
                     }, 100);
                 }
+                
+                // Auto refresh order logs when switching to orders tab
+                if (btn.dataset.tab === 'orders') {
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({ type: 'get_order_logs', limit: 50 }));
+                    }
+                }
             });
         });
 
@@ -931,6 +939,20 @@
                 if (elOkxNet) {
                     elOkxNet.textContent = okxNet.toFixed(2);
                     elOkxNet.style.color = okxNet > 0 ? 'var(--green)' : (okxNet < 0 ? 'var(--red)' : '#d29922');
+                }
+                
+                // Update strategy position
+                const positionEl = document.getElementById('strategy-position');
+                if (positionEl && accountState.position) {
+                    const pos = accountState.position;
+                    if (pos.level > 0 && pos.direction) {
+                        const dirLabel = pos.direction === 'long' ? 'Long' : 'Short';
+                        positionEl.textContent = `L${pos.level} ${dirLabel}`;
+                        positionEl.style.color = pos.direction === 'long' ? 'var(--green)' : 'var(--red)';
+                    } else {
+                        positionEl.textContent = 'Flat';
+                        positionEl.style.color = 'var(--text-secondary)';
+                    }
                 }
             } catch (e) {
                 console.error("Render Account Error", e);
@@ -1129,8 +1151,8 @@
                 
                 // Send initial requests
                 ws.send(JSON.stringify({ type: "get_history", task_id: currentTask }));
-                ws.send(JSON.stringify({ type: "get_account" }));
-                ws.send(JSON.stringify({ type: "get_params" }));
+                ws.send(JSON.stringify({ type: "get_account", payload: { task_id: currentTask } }));
+                ws.send(JSON.stringify({ type: "get_params", payload: { task_id: currentTask } }));
                 ws.send(JSON.stringify({ type: "get_order_logs", limit: 50 }));
 
                 if (reconnectTimer) {
@@ -1601,20 +1623,20 @@
                 
                 // 生成触发条件描述
                 let triggerDesc = '';
-                if (signal.trigger === 'manual') {
-                    triggerDesc = `<div class="trigger-desc manual">🖐 手动交易</div>`;
-                } else if (signal.trigger === 'auto') {
+                if (signal.trigger === 'manual' || signal.trigger === 'manual_reversal') {
+                    const triggerLabel = signal.trigger === 'manual_reversal' ? '🔄 手动反转' : '🖐 手动交易';
+                    const reasonText = signal.reason || '';
+                    triggerDesc = `<div class="trigger-desc manual">${triggerLabel}${reasonText ? '<br><span style="font-size: 0.75rem; color: var(--text-secondary);">' + reasonText + '</span>' : ''}</div>`;
+                } else if (signal.trigger === 'auto' || signal.trigger === 'auto_reversal') {
+                    const isReversal = signal.trigger === 'auto_reversal';
                     const action = signal.action === 'short' ? '做空' : '做多';
-                    const spreadType = signal.action === 'short' ? '做空价差' : '做多价差';
-                    const currentSpread = signal.current_spread?.toFixed(2) || '--';
-                    const threshold = signal.threshold?.toFixed(2) || '--';
-                    const emaVal = ema?.toFixed(2) || '--';
-                    const op = signal.action === 'short' ? '>' : '<';
+                    const triggerLabel = isReversal ? `🔄 自动反转 → ${action}` : `⚡ 自动${action}`;
+                    const reasonText = signal.reason || '';
                     
                     triggerDesc = `
                         <div class="trigger-desc auto">
-                            ⚡ 自动${action} L${level}: ${spreadType} (${currentSpread}) ${op} 阈值 (${threshold})
-                            <br><span style="font-size: 0.75rem; color: var(--text-secondary);">EMA: ${emaVal}</span>
+                            ${triggerLabel} L${level}
+                            <br><span style="font-size: 0.75rem; color: var(--text-secondary);">${reasonText}</span>
                         </div>`;
                 } else if (signal.trigger) {
                     triggerDesc = `<div class="trigger-desc">${signal.trigger}</div>`;
@@ -1860,7 +1882,7 @@
         // Account Polling
         setInterval(() => {
             if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: "get_account" }));
+                ws.send(JSON.stringify({ type: "get_account", payload: { task_id: currentTask } }));
             }
         }, 3000);
 

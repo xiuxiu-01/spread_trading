@@ -159,14 +159,30 @@ class TaskPersistence:
         Returns:
             ArbitrageTask instance
         """
+        from ..models.arbitrage import ArbitrageStatus
+        
         task = ArbitrageTask(
             task_id=data.get("task_id", ""),
+            name=data.get("name", ""),
             exchange_a=data.get("exchange_a", "mt5"),
             exchange_b=data.get("exchange_b", "okx"),
             symbol_a=data.get("symbol_a", ""),
             symbol_b=data.get("symbol_b", ""),
             config=data.get("config", {})
         )
+        
+        # Restore position state (CRITICAL for avoiding duplicate trades)
+        if "current_level" in data:
+            task.current_level = int(data["current_level"])
+        if "direction" in data:
+            task.direction = str(data["direction"])
+        
+        # Restore status
+        if "status" in data:
+            try:
+                task.status = ArbitrageStatus(data["status"])
+            except ValueError:
+                task.status = ArbitrageStatus.IDLE
         
         # Restore additional state if present
         if "total_pnl" in data:
@@ -177,12 +193,20 @@ class TaskPersistence:
             task.win_trades = int(data["win_trades"])
         if "error_count" in data:
             task.error_count = int(data["error_count"])
-            
+        
+        # Restore timestamps
         if data.get("created_at"):
             try:
                 task.created_at = datetime.fromisoformat(data["created_at"])
             except:
                 pass
+        if data.get("last_trade_at"):
+            try:
+                task.last_trade_at = datetime.fromisoformat(data["last_trade_at"])
+            except:
+                pass
+        
+        logger.debug(f"Restored task {task.task_id}: level={task.current_level}, dir='{task.direction}', status={task.status.value}")
         
         return task
 

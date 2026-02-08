@@ -509,6 +509,10 @@
                     <div class="stat-value neutral" id="runningTasks">0</div>
                 </div>
                 <div class="stat-card">
+                    <div class="stat-label">Position</div>
+                    <div class="stat-value neutral" id="currentPosition">Flat</div>
+                </div>
+                <div class="stat-card">
                     <div class="stat-label">Total PnL</div>
                     <div class="stat-value" id="totalPnl">$0.00</div>
                 </div>
@@ -530,7 +534,7 @@
                 <table>
                     <thead>
                         <tr>
-                            <th>Task</th>
+                            <th>名称</th>
                             <th>Symbol</th>
                             <th>Exchanges</th>
                             <th>Status</th>
@@ -573,7 +577,7 @@
                 <table>
                     <thead>
                         <tr>
-                            <th>Task ID</th>
+                            <th>名称</th>
                             <th>Symbol</th>
                             <th>Exchange A</th>
                             <th>Exchange B</th>
@@ -652,6 +656,12 @@
                 <button class="modal-close" onclick="closeNewTaskModal()">&times;</button>
             </div>
             <div class="modal-body">
+                <!-- Task Name -->
+                <div class="form-group">
+                    <label class="form-label">Task Name</label>
+                    <input type="text" class="form-input" id="modalTaskName" placeholder="e.g. XAU MT5-OKX Arb">
+                </div>
+                
                 <!-- Step 1: Select Symbol -->
                 <div class="form-group">
                     <label class="form-label">Select Symbol</label>
@@ -910,6 +920,25 @@
         function updateDashboard(data) {
             document.getElementById('runningTasks').textContent = data.running_tasks || 0;
             
+            // Update Position - show first running task's position
+            const positionEl = document.getElementById('currentPosition');
+            if (data.tasks && data.tasks.length > 0) {
+                const runningTask = data.tasks.find(t => t.status === 'running');
+                if (runningTask && runningTask.current_level > 0) {
+                    const dir = runningTask.direction || '';
+                    const level = runningTask.current_level || 0;
+                    const dirLabel = dir === 'long' ? 'Long' : dir === 'short' ? 'Short' : '';
+                    positionEl.textContent = `L${level} ${dirLabel}`;
+                    positionEl.className = 'stat-value ' + (dir === 'long' ? 'positive' : dir === 'short' ? 'negative' : 'neutral');
+                } else {
+                    positionEl.textContent = 'Flat';
+                    positionEl.className = 'stat-value neutral';
+                }
+            } else {
+                positionEl.textContent = 'Flat';
+                positionEl.className = 'stat-value neutral';
+            }
+            
             const pnl = data.total_pnl || 0;
             const pnlEl = document.getElementById('totalPnl');
             pnlEl.textContent = `$${pnl.toFixed(2)}`;
@@ -937,7 +966,7 @@
             
             tbody.innerHTML = tasks.map(task => `
                 <tr style="cursor: pointer;">
-                    <td><a href="index.html?task=${task.task_id}&symbol=${task.symbol}&exA=${task.exchange_a}&exB=${task.exchange_b}&symA=${encodeURIComponent(task.symbol_a || '')}&symB=${encodeURIComponent(task.symbol_b || '')}" style="color: var(--accent); text-decoration: none;"><strong>${task.task_id}</strong></a></td>
+                    <td><a href="index.html?task=${task.task_id}&symbol=${task.symbol}&exA=${task.exchange_a}&exB=${task.exchange_b}&symA=${encodeURIComponent(task.symbol_a || '')}&symB=${encodeURIComponent(task.symbol_b || '')}" style="color: var(--accent); text-decoration: none;"><strong>${task.name || task.task_id}</strong></a></td>
                     <td>${SYMBOLS[task.symbol]?.icon || ''} ${task.symbol || task.symbol_a}</td>
                     <td>
                         <span style="color: ${EXCHANGES[task.exchange_a]?.color || '#fff'}">${(task.exchange_a || '').toUpperCase()}</span>
@@ -1047,7 +1076,7 @@
             if (!task) return;
             
             currentDetailTaskId = taskId;
-            document.getElementById('detailTaskTitle').textContent = `${SYMBOLS[task.symbol]?.icon || ''} ${task.symbol} - ${task.task_id}`;
+            document.getElementById('detailTaskTitle').textContent = `${SYMBOLS[task.symbol]?.icon || ''} ${task.name || task.symbol || task.task_id}`;
             
             // Update toggle button
             const btnToggle = document.getElementById('btnToggleTask');
@@ -1062,7 +1091,8 @@
             document.getElementById('taskDetailGrid').innerHTML = `
                 <div class="detail-section">
                     <h4>📊 Configuration</h4>
-                    <div class="detail-row"><span class="detail-label">Task ID</span><span class="detail-value">${task.task_id}</span></div>
+                    <div class="detail-row"><span class="detail-label">名称</span><span class="detail-value">${task.name || task.task_id}</span></div>
+                    <div class="detail-row"><span class="detail-label">Task ID</span><span class="detail-value" style="font-size:0.85em; color:var(--text-secondary)">${task.task_id}</span></div>
                     <div class="detail-row"><span class="detail-label">Symbol</span><span class="detail-value">${task.symbol || task.symbol_a}</span></div>
                     <div class="detail-row"><span class="detail-label">Exchange A</span><span class="detail-value">${EXCHANGES[task.exchange_a]?.icon || ''} ${task.exchange_a?.toUpperCase()}<br><small style="color:var(--text-secondary)">${task.symbol_a}</small></span></div>
                     <div class="detail-row"><span class="detail-label">Exchange B</span><span class="detail-value">${EXCHANGES[task.exchange_b]?.icon || ''} ${task.exchange_b?.toUpperCase()}<br><small style="color:var(--text-secondary)">${task.symbol_b}</small></span></div>
@@ -1253,6 +1283,7 @@
         function createNewTask() {
             const symbolCode = document.getElementById('modalSymbol').value;
             const symbol = SYMBOLS[symbolCode];
+            const taskName = document.getElementById('modalTaskName').value.trim();
             
             if (selectedExchangeA === selectedExchangeB) {
                 alert('Please select different exchanges for A and B');
@@ -1263,6 +1294,7 @@
             
             const payload = {
                 task_id: taskId,
+                name: taskName || `${selectedExchangeA}-${selectedExchangeB}`,
                 exchange_a: selectedExchangeA,
                 exchange_b: selectedExchangeB,
                 symbol: symbolCode,

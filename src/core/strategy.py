@@ -25,6 +25,8 @@ class Signal:
     type: SignalType
     level: int = 0
     spread: float = 0
+    spread_buy: float = 0  # For long signals
+    spread_sell: float = 0  # For short signals
     ema: float = 0
     threshold: float = 0
     reason: str = ""
@@ -125,44 +127,111 @@ class EMASpreadStrategy(BaseStrategy):
         current_level: int,
         current_direction: str
     ) -> Signal:
-        """Check for entry or add-on signal."""
+        """Check for entry or add-on signal. Returns the MAX achievable level.
         
-        # If already at max position, no new signals
-        if current_level >= self.max_pos:
-            return Signal(type=SignalType.NONE)
+        Supports reversal: if holding short and long signal triggers (or vice versa),
+        returns the reversal signal with level indicating the target level after reversal.
+        """
         
-        next_level = current_level + 1
-        threshold = self.get_threshold(next_level)
+        # If already at max position in same direction, no new signals for that direction
+        # But still check for reversal signals
         
-        # Check for short signal (sell MT5, buy OKX)
-        # Triggered when spread_sell > ema + threshold
-        short_trigger = ema + threshold
-        if spread_sell > short_trigger:
-            # Can only go short if flat or already short
-            if current_direction in ("", "short"):
-                return Signal(
-                    type=SignalType.SHORT,
-                    level=next_level,
-                    spread=spread_sell,
-                    ema=ema,
-                    threshold=short_trigger,
-                    reason=f"Spread {spread_sell:.2f} > Trigger {short_trigger:.2f} (EMA {ema:.2f} + {threshold:.2f})"
-                )
+        # Find the maximum level we can reach in one trade
+        # Instead of just checking next_level, check all levels up to max_pos
         
-        # Check for long signal (buy MT5, sell OKX)
-        # Triggered when spread_buy < ema - threshold
-        long_trigger = ema - threshold
-        if spread_buy < long_trigger:
-            # Can only go long if flat or already long
-            if current_direction in ("", "long"):
-                return Signal(
-                    type=SignalType.LONG,
-                    level=next_level,
-                    spread=spread_buy,
-                    ema=ema,
-                    threshold=long_trigger,
-                    reason=f"Spread {spread_buy:.2f} < Trigger {long_trigger:.2f} (EMA {ema:.2f} - {threshold:.2f})"
-                )
+        best_short_level = 0
+        best_long_level = 0
+        
+        # For same direction: check levels from current_level+1 to max_pos
+        # For reversal: check levels from 1 to max_pos (start fresh after reversal)
+        
+        # Check short signals
+        for target_level in range(1, self.max_pos + 1):
+            threshold = self.get_threshold(target_level)
+            short_trigger = ema + threshold
+            if spread_sell > short_trigger:
+                if current_direction == "short":
+                    # Same direction - only if target > current
+                    if target_level > current_level:
+                        best_short_level = target_level
+                elif current_direction in ("", "long"):
+                    # Flat or reversal
+                    best_short_level = target_level
+        
+        # Check long signals
+        for target_level in range(1, self.max_pos + 1):
+            threshold = self.get_threshold(target_level)
+            long_trigger = ema - threshold
+            if spread_buy < long_trigger:
+                if current_direction == "long":
+                    # Same direction - only if target > current
+                    if target_level > current_level:
+                        best_long_level = target_level
+                elif current_direction in ("", "short"):
+                    # Flat or reversal
+                    best_long_level = target_level
+        
+        # Return the best signal found
+        # Priority: prefer reversal signals if they exist (market is moving against position)
+        
+        # If currently short and long signal found - this is a reversal
+        if current_direction == "short" and best_long_level > 0:
+            threshold = self.get_threshold(best_long_level)
+            long_trigger = ema - threshold
+            return Signal(
+                type=SignalType.LONG,
+                level=best_long_level,
+                spread=spread_buy,
+                spread_sell=spread_sell,
+                spread_buy=spread_buy,
+                ema=ema,
+                threshold=long_trigger,
+                reason=f"REVERSAL: Spread {spread_buy:.2f} < Trigger {long_trigger:.2f} (EMA {ema:.2f} - {threshold:.2f})"
+            )
+        
+        # If currently long and short signal found - this is a reversal
+        if current_direction == "long" and best_short_level > 0:
+            threshold = self.get_threshold(best_short_level)
+            short_trigger = ema + threshold
+            return Signal(
+                type=SignalType.SHORT,
+                level=best_short_level,
+                spread=spread_sell,
+                spread_sell=spread_sell,
+                spread_buy=spread_buy,
+                ema=ema,
+                threshold=short_trigger,
+                reason=f"REVERSAL: Spread {spread_sell:.2f} > Trigger {short_trigger:.2f} (EMA {ema:.2f} + {threshold:.2f})"
+            )
+        
+        # Same direction add-on or new position
+        if best_short_level > 0 and current_direction in ("", "short"):
+            threshold = self.get_threshold(best_short_level)
+            short_trigger = ema + threshold
+            return Signal(
+                type=SignalType.SHORT,
+                level=best_short_level,
+                spread=spread_sell,
+                spread_sell=spread_sell,
+                spread_buy=spread_buy,
+                ema=ema,
+                threshold=short_trigger,
+                reason=f"Spread {spread_sell:.2f} > Trigger {short_trigger:.2f} (EMA {ema:.2f} + {threshold:.2f})"
+            )
+        
+        if best_long_level > 0 and current_direction in ("", "long"):
+            threshold = self.get_threshold(best_long_level)
+            long_trigger = ema - threshold
+            return Signal(
+                type=SignalType.LONG,
+                level=best_long_level,
+                spread=spread_buy,
+                spread_sell=spread_sell,
+                spread_buy=spread_buy,
+                ema=ema,
+                threshold=long_trigger,
+                reason=f"Spread {spread_buy:.2f} < Trigger {long_trigger:.2f} (EMA {ema:.2f} - {threshold:.2f})"
+            )
         
         return Signal(type=SignalType.NONE)
     

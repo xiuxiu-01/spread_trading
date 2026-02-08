@@ -638,6 +638,10 @@
                     <div class="stat-value neutral" id="runningTasks">0</div>
                 </div>
                 <div class="stat-card">
+                    <div class="stat-label">Position</div>
+                    <div class="stat-value neutral" id="currentPosition">Flat</div>
+                </div>
+                <div class="stat-card">
                     <div class="stat-label">Total PnL</div>
                     <div class="stat-value" id="totalPnl">$0.00</div>
                 </div>
@@ -914,6 +918,25 @@
             
             // Update stats
             document.getElementById('runningTasks').textContent = data.running_tasks || 0;
+            
+            // Update Position - show first running task's position
+            const positionEl = document.getElementById('currentPosition');
+            if (data.tasks && data.tasks.length > 0) {
+                const runningTask = data.tasks.find(t => t.status === 'running');
+                if (runningTask && runningTask.current_level > 0) {
+                    const dir = runningTask.direction || '';
+                    const level = runningTask.current_level || 0;
+                    const dirLabel = dir === 'long' ? 'Long' : dir === 'short' ? 'Short' : '';
+                    positionEl.textContent = `L${level} ${dirLabel}`;
+                    positionEl.className = 'stat-value ' + (dir === 'long' ? 'positive' : dir === 'short' ? 'negative' : 'neutral');
+                } else {
+                    positionEl.textContent = 'Flat';
+                    positionEl.className = 'stat-value neutral';
+                }
+            } else {
+                positionEl.textContent = 'Flat';
+                positionEl.className = 'stat-value neutral';
+            }
             
             const pnl = data.total_pnl || 0;
             const pnlEl = document.getElementById('totalPnl');
