@@ -124,6 +124,13 @@ class CCXTGateway(BaseGateway):
             }
         }
         
+        # Merge extra options into options dict or top-level config as appropriate
+        for key, value in self.options.items():
+            if key in ['proxies', 'timeout', 'verbose', 'uid']:
+                config[key] = value
+            else:
+                config['options'][key] = value
+
         # OKX-specific: Force swap market type
         if self.exchange_id == "okx" and is_swap:
             config["options"]["defaultMarket"] = "swap"
@@ -140,17 +147,18 @@ class CCXTGateway(BaseGateway):
         if self.password:
             config["password"] = self.password
         
-        # Add proxy settings if available
-        import os
-        http_proxy = os.getenv('HTTP_PROXY')
-        https_proxy = os.getenv('HTTPS_PROXY')
-        if http_proxy or https_proxy:
-            proxies = {}
-            if http_proxy:
-                proxies['http'] = http_proxy
-            if https_proxy:
-                proxies['https'] = https_proxy
-            config['proxies'] = proxies
+        # Add proxy settings from environment if not provided in options
+        if 'proxies' not in config:
+            import os
+            http_proxy = os.getenv('HTTP_PROXY')
+            https_proxy = os.getenv('HTTPS_PROXY')
+            if http_proxy or https_proxy:
+                proxies = {}
+                if http_proxy:
+                    proxies['http'] = http_proxy
+                if https_proxy:
+                    proxies['https'] = https_proxy
+                config['proxies'] = proxies
         
         # Create aiohttp session with ThreadedResolver to avoid aiodns DNS issues on Windows
         connector = aiohttp.TCPConnector(resolver=aiohttp.resolver.ThreadedResolver())
@@ -521,8 +529,10 @@ class CCXTGateway(BaseGateway):
         return list(EXCHANGE_CLASSES.keys())
     
     @classmethod
-    def create_from_config(cls, config: "ExchangeConfig", symbol: str) -> "CCXTGateway":
-        """Create gateway from ExchangeConfig."""
+    def create_from_config(cls, config: Any, symbol: str) -> "CCXTGateway":
+        """
+        Create gateway from configuration object.
+        """
         return cls(
             exchange_name=config.name,
             symbol=symbol,
