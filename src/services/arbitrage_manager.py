@@ -379,11 +379,29 @@ class ArbitrageManager:
         
         logger.info(f"Starting tick loop for {task_id}")
         
+        # Start WebSocket subscriptions for CCXT gateways (to avoid REST rate limits)
+        use_ws_a = hasattr(gw_a, 'subscribe_ticker')
+        use_ws_b = hasattr(gw_b, 'subscribe_ticker')
+        
+        if use_ws_b and hasattr(gw_b, '_ws_task'):
+            # Start WebSocket subscription for OKX/CCXT gateway
+            await gw_b.subscribe_ticker()
+            logger.info(f"{task_id}: Started WebSocket subscription for {task.exchange_b}")
+            # Wait a moment for first tick
+            await asyncio.sleep(0.5)
+        
         while task.is_active:
             try:
                 # Get ticks from both exchanges
+                # For MT5: always use REST (get_ticker) as it's local
+                # For CCXT/OKX: prefer cached WebSocket tick to avoid rate limits
                 tick_a = await gw_a.get_ticker()
-                tick_b = await gw_b.get_ticker()
+                
+                # For gateway B (OKX), use cached last_tick from WebSocket if available
+                if use_ws_b and gw_b.last_tick:
+                    tick_b = gw_b.last_tick
+                else:
+                    tick_b = await gw_b.get_ticker()
                 
                 if tick_a and tick_b:
                     # Calculate spreads

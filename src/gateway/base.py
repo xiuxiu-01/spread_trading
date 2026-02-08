@@ -60,6 +60,11 @@ class BaseGateway(ABC):
         self._on_position: Optional[Callable[[Position], Awaitable[None]]] = None
         self._on_error: Optional[Callable[[str], Awaitable[None]]] = None
     
+    @property
+    def last_tick(self) -> Optional[Tick]:
+        """Get last cached tick (for WebSocket mode)."""
+        return getattr(self, '_last_tick', None)
+    
     # --- Connection Management ---
     
     @abstractmethod

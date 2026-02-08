@@ -777,6 +777,21 @@
                         <input type="number" class="form-input" id="tradeVol" value="0.01" step="0.01">
                     </div>
                 </div>
+                
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label">Qty Multiplier</label>
+                        <input type="number" class="form-input" id="qtyMultiplier" value="100000" step="1000">
+                        <small style="color: var(--text-secondary); font-size: 0.75rem;">XAU: 100000, XAG: 500000</small>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Dry Run</label>
+                        <select class="form-select" id="dryRun">
+                            <option value="false">No (Real Trading)</option>
+                            <option value="true">Yes (Simulation)</option>
+                        </select>
+                    </div>
+                </div>
             </div>
             <div class="modal-footer">
                 <button class="btn btn-outline" onclick="closeCreateTaskModal()">Cancel</button>
@@ -1062,19 +1077,50 @@
         // Modal functions
         function openCreateTaskModal() {
             document.getElementById('createTaskModal').classList.add('active');
+            // Update qtyMultiplier based on current symbol
+            updateQtyMultiplierDefault();
         }
         
         function closeCreateTaskModal() {
             document.getElementById('createTaskModal').classList.remove('active');
         }
         
+        function updateQtyMultiplierDefault() {
+            const symbolA = document.getElementById('symbolA').value || '';
+            const symbolB = document.getElementById('symbolB').value || '';
+            const qtyInput = document.getElementById('qtyMultiplier');
+            
+            // Only auto-update if user hasn't manually changed it
+            if (symbolA.includes('XAG') || symbolB.includes('XAG')) {
+                qtyInput.value = 500000;
+            } else if (symbolA.includes('XAU') || symbolB.includes('XAU')) {
+                qtyInput.value = 100000;
+            }
+        }
+        
+        // Auto-update qtyMultiplier when symbol changes
+        document.getElementById('symbolA').addEventListener('change', updateQtyMultiplierDefault);
+        document.getElementById('symbolB').addEventListener('change', updateQtyMultiplierDefault);
+        document.getElementById('symbolA').addEventListener('input', updateQtyMultiplierDefault);
+        document.getElementById('symbolB').addEventListener('input', updateQtyMultiplierDefault);
+        
         function createTask() {
+            // Get symbol to determine default qtyMultiplier
+            const symbolA = document.getElementById('symbolA').value || 'XAUUSD';
+            const symbolB = document.getElementById('symbolB').value || 'XAU/USDT:USDT';
+            
+            // Determine default multiplier based on symbol
+            let defaultMultiplier = 100000;
+            if (symbolA.includes('XAG') || symbolB.includes('XAG')) {
+                defaultMultiplier = 500000;
+            }
+            
             const payload = {
                 task_id: document.getElementById('taskId').value || `task-${Date.now()}`,
                 exchange_a: document.getElementById('exchangeA').value,
                 exchange_b: document.getElementById('exchangeB').value,
-                symbol_a: document.getElementById('symbolA').value || 'XAUUSD',
-                symbol_b: document.getElementById('symbolB').value || 'XAU/USDT:USDT',
+                symbol_a: symbolA,
+                symbol_b: symbolB,
                 config: {
                     emaPeriod: parseInt(document.getElementById('emaPeriod').value) || 20,
                     firstSpread: parseFloat(document.getElementById('firstSpread').value) || 3.0,
@@ -1082,6 +1128,8 @@
                     takeProfit: parseFloat(document.getElementById('takeProfit').value) || 0.5,
                     maxPos: parseInt(document.getElementById('maxPos').value) || 3,
                     tradeVolume: parseFloat(document.getElementById('tradeVol').value) || 0.01,
+                    qtyMultiplier: parseFloat(document.getElementById('qtyMultiplier').value) || defaultMultiplier,
+                    dryRun: document.getElementById('dryRun').value === 'true',
                 }
             };
             

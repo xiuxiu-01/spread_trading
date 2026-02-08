@@ -1176,10 +1176,10 @@
             if (okxSeries) okxSeries.setData([]);
             globalSpreadData = [];
             
-            ws.send(JSON.stringify({ type: "get_history", task_id: taskId }));
-            ws.send(JSON.stringify({ type: "get_account", task_id: taskId }));
-            ws.send(JSON.stringify({ type: "get_params", task_id: taskId }));
-            ws.send(JSON.stringify({ type: "get_order_logs", limit: 50, task_id: taskId }));
+            ws.send(JSON.stringify({ type: "get_history", payload: { task_id: taskId } }));
+            ws.send(JSON.stringify({ type: "get_account", payload: { task_id: taskId } }));
+            ws.send(JSON.stringify({ type: "get_params", payload: { task_id: taskId } }));
+            ws.send(JSON.stringify({ type: "get_order_logs", payload: { limit: 50, task_id: taskId } }));
         }
 
         const paramsForm = document.getElementById('paramsForm');
@@ -1247,6 +1247,12 @@
 
             if (msg.type === 'params') {
                 updateParamsUI(msg.payload);
+            } else if (msg.type === 'params_updated') {
+                // Handle params update confirmation
+                if (msg.payload && msg.payload.config) {
+                    updateParamsUI(msg.payload.config);
+                    addLog('参数更新已生效', 'success');
+                }
             } else if (msg.type === 'account') {
                 // addLog('Received account update', 'info');
                 renderAccount(msg.payload);
@@ -1507,7 +1513,7 @@
                 // FIXED: Include task_id in the manual trade payload
                 setTimeout(() => ws.send(JSON.stringify({ 
                     type: 'make_long', 
-                    task_id: currentTask 
+                    payload: { task_id: currentTask } 
                 })), 100);
                 
                 addLog(`手动做多 [${currentTask}], 手数=${vol}`, 'info');
@@ -1520,7 +1526,7 @@
                 // FIXED: Include task_id in the manual trade payload
                 setTimeout(() => ws.send(JSON.stringify({ 
                     type: 'make_short', 
-                    task_id: currentTask 
+                    payload: { task_id: currentTask } 
                 })), 100);
                 
                 addLog(`手动做空 [${currentTask}], 手数=${vol}`, 'info');
@@ -1531,7 +1537,7 @@
                     // FIXED: Include task_id in close_all
                     ws.send(JSON.stringify({ 
                         type: 'close_all',
-                        task_id: currentTask
+                        payload: { task_id: currentTask }
                     }));
                     addLog(`任务 ${currentTask} 全部平仓已触发`, 'warn');
                 }
@@ -1744,7 +1750,7 @@
         // Refresh Order Logs button
         document.getElementById('refreshOrderLogs')?.addEventListener('click', () => {
             if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: 'get_order_logs', limit: 50, task_id: currentTask }));
+                ws.send(JSON.stringify({ type: 'get_order_logs', payload: { limit: 50, task_id: currentTask } }));
                 addLog('正在获取订单日志...', 'info');
             }
         });
@@ -1829,7 +1835,8 @@
             document.getElementById('mt5Symbol').textContent = params.MT5_SYMBOL || '-';
             document.getElementById('okxSymbol').textContent = params.OKX_SYMBOL || '-';
 
-            const editableKeys = ['emaPeriod', 'firstSpread', 'nextSpread', 'takeProfit', 'maxPos'];
+            const editableKeys = ['emaPeriod', 'firstSpread', 'nextSpread', 'takeProfit', 'maxPos', 'qtyMultiplier'];
+            
             paramsForm.innerHTML = '';
             
             editableKeys.forEach(key => {
@@ -1842,12 +1849,19 @@
                     input.type = 'number';
                     input.value = params[key];
                     input.dataset.key = key;
-                    input.step = key.includes('Spread') || key.includes('Profit') ? '0.1' : '1';
+                    input.step = key.includes('Spread') || key.includes('Profit') ? '0.1' : (key === 'qtyMultiplier' ? '100' : '1');
                     div.appendChild(label);
                     div.appendChild(input);
                     paramsForm.appendChild(div);
                 }
             });
+
+            // Re-render thresholds if spread params changed
+            if (params.firstSpread !== undefined || params.nextSpread !== undefined || params.maxPos !== undefined) {
+                 if (typeof globalEmaData !== 'undefined' && globalEmaData.length > 0) {
+                     setThresholdSeriesData(globalEmaData);
+                 }
+            }
 
             document.getElementById('tradeVol').value = params.tradeVolume || 0.01;
             
@@ -1868,12 +1882,16 @@
             const v = document.getElementById('tradeVol').value;
             if (v) payload['tradeVolume'] = parseFloat(v);
             
+            // Add task_id to payload to make it specific
+            payload['task_id'] = currentTask;
+
             if (ws && ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({ type: 'params', payload }));
                 addLog('参数已更新', 'success');
                 
                 setTimeout(() => {
-                    ws.send(JSON.stringify({ type: 'refresh_history' }));
+                    // FIXED: refresh history for current task
+                    ws.send(JSON.stringify({ type: 'refresh_history', payload: { task_id: currentTask } }));
                 }, 200);
             }
         });
@@ -1951,7 +1969,7 @@
         // Account Polling
         setInterval(() => {
             if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: "get_account", task_id: currentTask }));
+                ws.send(JSON.stringify({ type: "get_account", payload: { task_id: currentTask } }));
             }
         }, 3000);
 

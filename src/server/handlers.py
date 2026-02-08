@@ -110,13 +110,25 @@ class MessageHandler:
         })
     
     async def _handle_params(self, websocket: Any, payload: Dict):
-        """Handle params update."""
+        """Handle parameters update."""
+        logger.info(f"Received params update: {payload}")
+        
+        # Check if this is a task-specific update
         task_id = payload.get("task_id")
-
-        if task_id:
-            # Task-specific update
-            # Use manager to update (handles strategy update + persistence)
-            new_params = {k: v for k, v in payload.items() if k != "task_id"}
+        
+        if task_id and task_id in self.manager.tasks:
+            new_params = {}
+            # Copy known params
+            for key in ["emaPeriod", "firstSpread", "nextSpread", "takeProfit", "maxPos", "tradeVolume", "autoTrade", "qtyMultiplier", "dryRun"]:
+                if key in payload:
+                    if key in ["emaPeriod", "maxPos"]:
+                        new_params[key] = int(payload[key])
+                    elif key in ["autoTrade", "dryRun"]:
+                        new_params[key] = bool(payload[key])
+                    else:
+                        new_params[key] = float(payload[key])
+            
+            logger.info(f"Updating params for {task_id}: {new_params}")
             self.manager.update_task_params(task_id, new_params)
             
             task = self.manager.tasks.get(task_id)
@@ -128,7 +140,7 @@ class MessageHandler:
             return
 
         # Legacy Global Update
-        # If we receive global params, we apply them to ALL tasks
+        # If we receive global params (no task_id), we apply them to ALL tasks (existing behavior)
         new_params = {}
         if "emaPeriod" in payload:
             settings.strategy.ema_period = int(payload["emaPeriod"])
@@ -149,6 +161,12 @@ class MessageHandler:
             self.trade_volume = float(payload["tradeVolume"])
             settings.strategy.trade_volume = self.trade_volume
             new_params["tradeVolume"] = self.trade_volume
+        if "qtyMultiplier" in payload:
+            qty_mult = float(payload["qtyMultiplier"])
+            # Update setting if it exists in settings model, otherwise just pass to task
+            if hasattr(settings.strategy, "qty_multiplier"):
+                settings.strategy.qty_multiplier = qty_mult
+            new_params["qtyMultiplier"] = qty_mult
         if "autoTrade" in payload:
             self.auto_trade = bool(payload["autoTrade"])
             new_params["autoTrade"] = self.auto_trade
@@ -375,34 +393,8 @@ class MessageHandler:
                         
                         multiplier = task.config.get("qtyMultiplier", 1.0)
                         if multiplier > 0:
-                             # Convert contracts to lots?
-                             # Or just display raw contracts?
-                             # User said "okx need to align with mt5 lots by contract multiplier"
-                             # This implies: Display = Contracts / Multiplier ? NO.
-                             # MT5 Lot = 100oz. OKX Contract = 0.01oz.
-                             # Multiplier = 100 / 0.01 = 10,000.
-                             # If I have 1 MT5 Lot, I need 10,000 OKX Contracts to be hedged.
-                             # If I have 10,000 OKX Contracts, I want to see "1.0" (Aligned)?
-                             # Or "10,000" (Aligned means correct hedge ratio)?
-                             
-                             # Usually "Aligned" means the hedging logic is correct.
-                             # But "okx余额看不见... okx需要和mt5的手数按合约倍数对齐"
-                             # "OKX Balance invisible, and I am not looking at PnL, I want original Lots, and OKX needs to align with MT5 lots by multiplier"
-                             
-                             # I will calculate Equivalent Lots for OKX
-                             okx_lots_equivalent = contracts / multiplier
-                             
-                             # Wait, if multiplier is 100,000 (from main.py for XAU)
-                             # And I have 1 MT5 Lot (100oz).
-                             # OKX Contract is 0.001oz (actually check main.py commentary)
-                             # "Multiplier = 100 / 0.001 = 100,000"
-                             # So 1 Lot MT5 = 100,000 Contracts.
-                             # If I display 100,000, it's huge. 
-                             # If user wants to see "1.0", I should divide by 100,000.
-                             # BUT, if I display 0.00001 it's also weird if the math is wrong.
-                             
-                             # Let's assume user wants to see the "Lots Equivalent"
-                             okx_net_lots += (okx_lots_equivalent * sign)
+                             # Display Equivalent Lots
+                             okx_net_lots += (contracts / multiplier * sign)
                         else:
                              okx_net_lots += (contracts * sign)
 
@@ -685,6 +677,16 @@ class MessageHandler:
             if "symbol" not in config and "symbol" in payload:
                 config["symbol"] = payload.get("symbol")
             
+            # Ensure qtyMultiplier is set
+            if "qtyMultiplier" not in config:
+                # Default logic: XAU -> 100000, XAG -> 500000, others -> 1.0 or user defined in settings
+                if "XAU" in symbol_a or "XAU" in symbol_b:
+                    config["qtyMultiplier"] = getattr(settings.strategy, "qty_multiplier_xau", 100000.0)
+                elif "XAG" in symbol_a or "XAG" in symbol_b:
+                    config["qtyMultiplier"] = getattr(settings.strategy, "qty_multiplier_xag", 500000.0)
+                else:
+                    config["qtyMultiplier"] = getattr(settings.strategy, "qty_multiplier", 100.0)
+
             # Add verified balances to config
             config["verified_balances"] = {
                 name: r.balance for name, r in verification_results.items()

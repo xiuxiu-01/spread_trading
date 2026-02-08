@@ -5,6 +5,7 @@ Handles saving and loading arbitrage tasks to/from disk.
 """
 
 import json
+import time
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 from datetime import datetime
@@ -65,7 +66,26 @@ class TaskPersistence:
             with open(temp_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
             
-            temp_file.replace(self.tasks_file)
+            # Windows compatibility: Retry logic for replace
+            max_retries = 5
+            for i in range(max_retries):
+                try:
+                    temp_file.replace(self.tasks_file)
+                    break
+                except PermissionError:
+                    if i == max_retries - 1:
+                        # On final failure, try unlink then rename (non-atomic but works)
+                        try:
+                            if self.tasks_file.exists():
+                                self.tasks_file.unlink()
+                            temp_file.rename(self.tasks_file)
+                        except Exception as e:
+                            logger.error(f"Final save attempt failed: {e}")
+                            raise e
+                    else:
+                        time.sleep(0.1)
+                except Exception as e:
+                    raise e
             
             logger.info(f"Saved {len(task_list)} tasks to {self.tasks_file}")
             return True
