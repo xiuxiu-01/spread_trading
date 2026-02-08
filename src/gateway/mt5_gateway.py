@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from .base import BaseGateway, GatewayStatus
 from ..models import Tick, Order, OrderSide, OrderStatus, Position, PositionSide
+from ..config import settings
 from ..config.logging_config import get_logger
 
 logger = get_logger("gateway.mt5")
@@ -161,7 +162,9 @@ class MT5Gateway(BaseGateway):
     async def get_klines(
         self,
         timeframe: str = "1m",
-        limit: int = 100
+        limit: int = 100,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None
     ) -> List[Dict[str, Any]]:
         """Get MT5 historical klines."""
         try:
@@ -188,8 +191,10 @@ class MT5Gateway(BaseGateway):
             if rates is None or len(rates) == 0:
                 return []
             
+            offset_seconds = settings.mt5.utc_offset * 3600
+
             return [{
-                "time": int(bar[0]),
+                "time": int(bar[0]) - offset_seconds,
                 "open": float(bar[1]),
                 "high": float(bar[2]),
                 "low": float(bar[3]),

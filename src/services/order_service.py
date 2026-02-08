@@ -33,14 +33,70 @@ class OrderService:
         """
         self.data_dir = data_dir
         self.orders_file = data_dir / "orders.jsonl"
+        self.daily_logs_dir = data_dir / "daily_logs"
+        self.daily_logs_dir.mkdir(parents=True, exist_ok=True)
         
         # Order tracking
         self.pending_orders: Dict[str, Order] = {}
         self.order_history: List[Order] = []
+        self.trade_history: List[Dict] = []
         
         # Load history
         self._load_history()
-    
+        self._load_trade_history()
+
+    def _load_trade_history(self):
+        """Load composite trade history from daily logs."""
+        try:
+            # Load from most recent logs first
+            files = sorted(list(self.daily_logs_dir.glob("orders_*.jsonl")), reverse=True)
+            for f in files[:5]: # Load last 5 files max
+                with open(f, "r", encoding="utf-8") as file:
+                    for line in file:
+                        try:
+                            self.trade_history.append(json.loads(line.strip()))
+                        except:
+                            continue
+            # Sort full history by ts
+            self.trade_history.sort(key=lambda x: x.get('ts', ''), reverse=True)
+        except Exception as e:
+            logger.error(f"Error loading trade history: {e}")
+
+    def log_composite_trade(self, trade_data: Dict):
+        """
+        Log a high-level composite trade (Strategy Trade).
+        
+        Args:
+            trade_data: Dictionary containing full trade context (signal, prices, results)
+        """
+        try:
+            # Ensure timestamp
+            if "ts" not in trade_data:
+                trade_data["ts"] = datetime.utcnow().isoformat() + "+00:00"
+            
+            # Add to memory
+            self.trade_history.insert(0, trade_data)
+            
+            # Write to file
+            today = datetime.utcnow().strftime("%Y-%m-%d")
+            filename = self.daily_logs_dir / f"orders_{today}.jsonl"
+            
+            with open(filename, "a", encoding="utf-8") as f:
+                f.write(json.dumps(trade_data) + "\n")
+                
+            logger.info(f"Logged composite trade: {trade_data.get('direction')} L{trade_data.get('level')}")
+            
+        except Exception as e:
+            logger.error(f"Failed to log composite trade: {e}")
+
+    def get_recent_trades(self, limit: int = 50, task_id: Optional[str] = None) -> List[Dict]:
+        """Get recent composite trades."""
+        if task_id:
+            # Filter by task_id in memory history
+            filtered = [t for t in self.trade_history if t.get('task_id') == task_id]
+            return filtered[:limit]
+        return self.trade_history[:limit]
+
     def _load_history(self):
         """Load order history from file."""
         if not self.orders_file.exists():
@@ -172,7 +228,8 @@ class OrderService:
     
     def get_recent_orders(self, limit: int = 50) -> List[Dict]:
         """Get recent orders."""
-        return self.order_history[-limit:]
+        # Return reversed so newest are first
+        return sorted(self.order_history, key=lambda x: x.get('created_at', ''), reverse=True)[:limit]
     
     def get_orders_by_date(self, date: str) -> List[Dict]:
         """Get orders for a specific date (YYYY-MM-DD)."""

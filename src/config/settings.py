@@ -31,6 +31,7 @@ class MT5Config:
     port: int = 18812
     symbol: str = "XAUUSD"
     enabled: bool = True
+    utc_offset: int = 0  # Hours to subtract from MT5 server time to get UTC
 
 
 @dataclass
@@ -85,6 +86,7 @@ class Settings:
         self.mt5.host = os.getenv("MT5_HOST", self.mt5.host)
         self.mt5.port = int(os.getenv("MT5_PORT", self.mt5.port))
         self.mt5.symbol = os.getenv("MT5_SYMBOL", self.mt5.symbol)
+        self.mt5.utc_offset = int(os.getenv("MT5_UTC_OFFSET_HOURS", "0"))
         
         # Server
         self.server.host = os.getenv("WS_HOST", self.server.host)

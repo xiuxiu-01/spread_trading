@@ -62,15 +62,31 @@ class ArbitrageManager:
         """Load tasks from disk on startup."""
         try:
             task_data_list = task_persistence.load_tasks()
+            loaded_count = 0
+            
             for task_data in task_data_list:
                 task = task_persistence.create_task_from_dict(task_data)
-                self.tasks[task.task_id] = task
-                logger.info(f"Loaded persisted task: {task.task_id}")
+                
+                # Check for duplicate before adding
+                if task.task_id not in self.tasks:
+                    self.tasks[task.task_id] = task
+                    loaded_count += 1
+                
+                # If task was RUNNING, we should restart it
+                # Note: We can't await here in __init__, so we'll need to schedule it
+                # We handle this in a separate method called after init
             
-            if task_data_list:
-                logger.info(f"Loaded {len(task_data_list)} tasks from disk")
+            if loaded_count:
+                logger.info(f"Loaded {loaded_count} tasks from disk")
         except Exception as e:
             logger.error(f"Failed to load persisted tasks: {e}")
+
+    async def restart_tasks(self):
+        """Restart active tasks after load."""
+        for task_id, task in self.tasks.items():
+            if task.status == ArbitrageStatus.RUNNING:
+                logger.info(f"Restarting persisted task: {task_id}")
+                await self.start_task(task_id)
     
     # --- Task Management ---
     
@@ -167,7 +183,7 @@ class ArbitrageManager:
             task.set_error(str(e))
             return False
 
-    async def _sync_history(self, task_id: str):
+    async def _sync_history(self, task_id: str, limit: int = 1440):
         """Fetch and sync recent history if market is open."""
         gateways = self.gateways.get(task_id, {})
         gw_a = gateways.get("a")
@@ -177,37 +193,46 @@ class ArbitrageManager:
         if not all([gw_a, gw_b, agg]):
             return
 
-        # Check market open
-        is_open = False
-        if hasattr(gw_a, 'is_market_open'):
-             if asyncio.iscoroutinefunction(gw_a.is_market_open):
-                 is_open = await gw_a.is_market_open()
-             else:
-                 is_open = gw_a.is_market_open()
-        
-        if not is_open:
-             logger.info(f"Market closed, skipping history sync for {task_id}")
-             return
-
-        logger.info(f"Market open, syncing last 1440 bars for {task_id}")
+        logger.info(f"Syncing last {limit} bars for {task_id}")
         
         try:
-             klines_a, klines_b = await asyncio.gather(
-                 gw_a.get_klines(limit=1440),
-                 gw_b.get_klines(limit=1440)
-             )
+             # 1. Fetch MT5 history first (master timeline)
+             klines_a = await gw_a.get_klines(limit=limit)
+             
+             if not klines_a:
+                 logger.warning(f"No history data received from MT5 for {task_id}")
+                 return
+
+             # 2. Determine start time for OKX sync
+             start_ts = klines_a[0]['time']
+             end_ts = klines_a[-1]['time']
+             logger.info(f"MT5 History Range: {start_ts} to {end_ts} (Count: {len(klines_a)})")
+             
+             # 3. Fetch OKX history starting from MT5 start time
+             # Calculate required limit based on time difference (minutes) plus padding
+             time_diff_min = (end_ts - start_ts) // 60
+             safety_limit = int(time_diff_min * 1.2) # 20% padding for gaps
+             # Ensure limit is at least the original limit
+             fetch_limit = max(limit, safety_limit)
+             
+             klines_b = await gw_b.get_klines(limit=fetch_limit, start_time=start_ts, end_time=end_ts)
+
         except Exception as e:
              logger.error(f"Failed to sync history for {task_id}: {e}")
              return
-             
+        
         if not klines_a or not klines_b:
-            logger.warning(f"No history data received for {task_id}")
+            logger.warning(f"No history data received for {task_id}: MT5={len(klines_a if klines_a else [])}, OKX={len(klines_b if klines_b else [])}")
             return
 
         dict_a = {x['time']: x for x in klines_a}
         dict_b = {x['time']: x for x in klines_b}
         
         common_times = sorted(list(set(dict_a.keys()) & set(dict_b.keys())))
+        logger.info(f"Unfiltered bars: MT5={len(klines_a)}, OKX={len(klines_b)}. Common timestamps: {len(common_times)}")
+
+        if len(klines_a) > 0 and len(klines_b) > 0:
+             logger.info(f"Sample TS - MT5: {klines_a[-1]['time']}, OKX: {klines_b[-1]['time']}")
         
         count = 0 
         existing_times = set(agg.times)
@@ -276,6 +301,28 @@ class ArbitrageManager:
             del self.strategies[task_id]
         
         logger.info(f"Removed task: {task_id}")
+        return True
+
+    def update_task_params(self, task_id: str, new_params: Dict[str, Any]) -> bool:
+        """
+        Update parameters for a running (or stopped) task.
+        Also updates the active strategy if it exists.
+        """
+        task = self.tasks.get(task_id)
+        if not task:
+            return False
+        
+        # Update config
+        for key, value in new_params.items():
+            task.config[key] = value
+            
+        # Update running strategy
+        if task_id in self.strategies:
+            self.strategies[task_id].update_params(new_params)
+            logger.info(f"Updated active strategy params for {task_id}")
+            
+        # Persist
+        task_persistence.save_tasks(self.tasks)
         return True
     
     # --- Gateway Management ---
@@ -372,11 +419,13 @@ class ArbitrageManager:
                                 "avg_spread_buy": avg_buy,
                                 "ema": agg.last_ema,
                                 "time": datetime.now().timestamp(),
+                                "bar_time": int(datetime.now().timestamp() // 60) * 60,
                                 "mt5_symbol": getattr(tick_a, 'symbol', ''),
                                 "okx_symbol": getattr(tick_b, 'symbol', '')
                             })
                         
                         # Check signals (if auto trade enabled)
+                        # Moved Back to Tick Loop, but using Last Closed K-Line EMA
                         if task.config.get("autoTrade", False):
                             await self._check_signals(task_id, avg_sell, avg_buy)
                 
@@ -470,8 +519,12 @@ class ArbitrageManager:
                     avg_sell, avg_buy, _ = agg.get_rolling_average()
                     
                     # Use rolling average for bar spread
+                    # Use MT5 bar timestamp for consistency
+                    ts_val = ts_a or datetime.now().timestamp()
+                    t_iso = datetime.fromtimestamp(ts_val, timezone.utc).isoformat()
+                    
                     bar = agg.add_bar(
-                        timestamp=datetime.now().isoformat(),
+                        timestamp=t_iso,
                         mt5_bar=bar_a,
                         okx_bar=bar_b,
                         spread_sell=avg_sell,
@@ -482,6 +535,9 @@ class ArbitrageManager:
                         await self._on_bar(task_id, bar)
                     
                     logger.debug(f"New bar for {task_id}: spread={bar['spread']:.2f}")
+
+                    # Check signals moved back to tick loop as per requirement "Open/Close is tick triggered"
+                    # logic remains consistent using agg.last_ema which updates here
         
         except Exception as e:
             logger.error(f"Kline update error for {task_id}: {e}")
@@ -580,15 +636,144 @@ class ArbitrageManager:
             # Persist task state (important for level tracking)
             task_persistence.save_tasks(self.tasks)
             
+            # Construct Composite Trade Log for Auto Trade
+            trade_record = {
+                 "task_id": task_id,
+                 "ts": datetime.now(timezone.utc).isoformat(),
+                 "order_id": int(datetime.now().timestamp() * 1000),
+                 "direction": signal.type.value,
+                 "level": signal.level,
+                 "vol": trade_volume,
+                 "status": "filled_all",
+                 "prices": {
+                     "spread_sell": signal.spread if hasattr(signal, 'spread') else 0,
+                     # Add other prices if available in signal object
+                 },
+                 "ema": signal.ema if hasattr(signal, 'ema') else 0,
+                 "signal": {
+                     "trigger": "auto",
+                     "action": signal.type.value,
+                     "level": signal.level,
+                     "reason": signal.reason,
+                     "threshold": signal.threshold if hasattr(signal, 'threshold') else 0
+                 },
+                 "mt5_result": result.get("order_a", {}),
+                 "okx_result": result.get("order_b", {}),
+                 "error": None
+            }
+             
+            self.order_service.log_composite_trade(trade_record)
+            
             if self._on_trade:
-                await self._on_trade(task_id, {
-                    "type": signal.type.value,
-                    "level": signal.level,
-                    "reason": signal.reason,
-                    "result": result
-                })
+                await self._on_trade(task_id, trade_record)
         else:
             logger.error(f"Trade execution failed for {task_id}: {result.get('error')}")
+
+    async def execute_manual_trade(self, task_id: str, direction: str, volume: Optional[float] = None) -> Dict[str, Any]:
+        """
+        Execute a manual trade.
+        Updates task state as if it were a Level 1 entry or increments level.
+        """
+        task = self.tasks.get(task_id)
+        if not task:
+            return {"success": False, "error": "Task not found"}
+            
+        gateways = self.gateways.get(task_id, {})
+        gw_a = gateways.get("a")
+        gw_b = gateways.get("b")
+        
+        if not gw_a or not gw_b:
+             return {"success": False, "error": "Gateways not ready"}
+
+        # Config
+        base_volume = float(task.config.get("tradeVolume", 0.01))
+        qty_multiplier = float(task.config.get("qtyMultiplier", 100.0))
+        dry_run = task.config.get("dryRun", True)
+        
+        trade_volume = volume if volume else base_volume
+        
+        # Check Reversal Logic (Simplistic: if opposite, close all first)
+        if task.has_position and task.direction != direction:
+             logger.info(f"Manual trade reversal: Closing {task.direction} first")
+             await self._close_position(task_id)
+        
+        logger.info(f"Executing MANUAL {direction} for {task_id}. Vol: {trade_volume}")
+        
+        result = await self.order_service.execute_arbitrage_orders(
+            gateway_a=gw_a,
+            gateway_b=gw_b,
+            direction=direction,
+            volume=trade_volume,
+            dry_run=dry_run,
+            qty_multiplier=qty_multiplier
+        )
+        
+        if result["success"]:
+             # Update Task State manually
+             # We assume manual trade adds 1 "level" worth of risk, or sets to level 1 if flat
+             if task.direction == direction:
+                 task.current_level += 1
+             else:
+                 task.direction = direction
+                 task.current_level = 1
+                 
+             task.last_trade_at = datetime.now()
+             task_persistence.save_tasks(self.tasks)
+             
+             # Construct Composite Trade Log
+             
+             # Fetch current tickers for logging accurate prices
+             tick_a = await gw_a.get_ticker()
+             tick_b = await gw_b.get_ticker()
+             
+             current_prices = {
+                 "mt5_bid": tick_a.bid if tick_a else 0, 
+                 "mt5_ask": tick_a.ask if tick_a else 0, 
+                 "okx_bid": tick_b.bid if tick_b else 0, 
+                 "okx_ask": tick_b.ask if tick_b else 0,
+             }
+             
+             # Calculate spreads from these ticks
+             if tick_a and tick_b:
+                 current_prices["spread_sell"] = tick_a.bid - tick_b.ask
+                 current_prices["spread_buy"] = tick_a.ask - tick_b.bid
+             else:
+                 current_prices["spread_sell"] = 0
+                 current_prices["spread_buy"] = 0
+             
+             trade_record = {
+                 "task_id": task_id,
+                 "ts": datetime.now(timezone.utc).isoformat(),
+                 "order_id": int(datetime.now().timestamp() * 1000),
+                 "direction": direction,
+                 "level": task.current_level,
+                 "vol": trade_volume,
+                 "status": "filled_all",
+                 "prices": current_prices,
+                 "ema": 0, # Placeholder
+                 "signal": {
+                     "trigger": "manual",
+                     "action": direction,
+                     "level": task.current_level,
+                     "reason": "Manual Trade"
+                 },
+                 "mt5_result": result.get("order_a", {}),
+                 "okx_result": result.get("order_b", {}),
+                 "error": None
+             }
+             
+             # Get latest market data if available
+             agg = self.aggregators.get(task_id)
+             if agg:
+                 trade_record["ema"] = agg.last_ema
+                 # We could fetch latest spreads from agg or gateways if needed
+             
+             self.order_service.log_composite_trade(trade_record)
+             
+             if self._on_trade:
+                await self._on_trade(task_id, trade_record)
+        
+        return result
     
     async def _close_position(self, task_id: str):
         """Close all positions for a task."""
@@ -633,6 +818,7 @@ class ArbitrageManager:
         if self._on_trade:
              await self._on_trade(task_id, {
                  "type": "close",
+                 "task_id": task_id,
                  "level": 0,
                  "reason": "signal_close",
                  "result": result

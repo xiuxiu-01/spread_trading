@@ -1127,11 +1127,11 @@
                 statusEl.className = 'status connected';
                 addLog('WebSocket 已连接', 'success');
                 
-                // Send initial requests
-                ws.send(JSON.stringify({ type: "get_history", task_id: currentTask }));
-                ws.send(JSON.stringify({ type: "get_account" }));
-                ws.send(JSON.stringify({ type: "get_params" }));
-                ws.send(JSON.stringify({ type: "get_order_logs", limit: 50 }));
+                // Get tasks list first
+                ws.send(JSON.stringify({ type: "get_tasks" }));
+                
+                // Also request data for current task (in case get_tasks fails or is slow)
+                requestTaskData(currentTask);
 
                 if (reconnectTimer) {
                     clearTimeout(reconnectTimer);
@@ -1168,6 +1168,19 @@
                 connect();
             }, 3000);
         }
+        
+        function requestTaskData(taskId) {
+            if (!taskId || !ws || ws.readyState !== WebSocket.OPEN) return;
+            // Clear old data first to avoid confusion
+            if (mt5Series) mt5Series.setData([]);
+            if (okxSeries) okxSeries.setData([]);
+            globalSpreadData = [];
+            
+            ws.send(JSON.stringify({ type: "get_history", task_id: taskId }));
+            ws.send(JSON.stringify({ type: "get_account", task_id: taskId }));
+            ws.send(JSON.stringify({ type: "get_params", task_id: taskId }));
+            ws.send(JSON.stringify({ type: "get_order_logs", limit: 50, task_id: taskId }));
+        }
 
         const paramsForm = document.getElementById('paramsForm');
         let currentParams = {};
@@ -1176,26 +1189,44 @@
         let currentTask = 'mt5-okx-xau';
         const taskSelector = document.getElementById('taskSelector');
         
+        // Parse URL params for task override
+        const urlParams = new URLSearchParams(window.location.search);
+        const urlTask = urlParams.get('task');
+        
+        if (urlTask) {
+            currentTask = urlTask;
+            console.log("Using task from URL:", currentTask);
+            
+            // Check if option exists
+            let optionExists = false;
+            for (let i = 0; i < taskSelector.options.length; i++) {
+                if (taskSelector.options[i].value === currentTask) {
+                    taskSelector.selectedIndex = i;
+                    optionExists = true;
+                    break;
+                }
+            }
+            
+            // If not exists, add it
+            if (!optionExists) {
+                const opt = document.createElement('option');
+                opt.value = currentTask;
+                // Try to get symbol from URL or use task ID
+                const urlSymbol = urlParams.get('symbol') || urlTask;
+                const displayLabel = urlParams.get('symbol') 
+                    ? `${urlParams.get('symbol')} (${currentTask.substring(0, 8)}...)` 
+                    : currentTask;
+                    
+                opt.text = displayLabel;
+                opt.selected = true;
+                taskSelector.appendChild(opt); // appendChild is better for select
+            }
+        }
+
         taskSelector.addEventListener('change', (e) => {
             currentTask = e.target.value;
             addLog(`切换任务至: ${currentTask}`, 'info');
-            
-            // Clear charts
-            if (mt5Series) mt5Series.setData([]);
-            if (okxSeries) okxSeries.setData([]);
-            if (spreadSellSeries) spreadSellSeries.setData([]);
-            if (spreadBuySeries) spreadBuySeries.setData([]);
-            if (emaSellSeries) emaSellSeries.setData([]);
-            if (emaBuySeries) emaBuySeries.setData([]);
-            
-            // Reset state
-            globalSpreadData = [];
-            globalEmaData = [];
-            
-            // Refresh
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: "get_history", task_id: currentTask }));
-            }
+            requestTaskData(currentTask);
         });
 
         let markers = [];
@@ -1233,14 +1264,60 @@
                 renderOrderMarkers();
             } else if (msg.type === 'tick') {
                 updateRealtimeQuotes(msg.payload);
-                updateThresholdSeries(msg.payload);
             } else if (msg.type === 'trade_result') {
                 handleTradeResult(msg.payload);
             } else if (msg.type === 'order_logs') {
                 renderOrderLogs(msg.payload);
+            } else if (msg.type === 'tasks') {
+                updateTaskSelector(msg.payload);
             }
         }
         
+        function updateTaskSelector(tasks) {
+            if (!tasks || !Array.isArray(tasks)) return;
+            
+            const selector = document.getElementById('taskSelector');
+            // Remember current selection
+            const currentSelection = currentTask;
+            
+            selector.innerHTML = '';
+            
+            let foundCurrent = false;
+            
+            tasks.forEach(task => {
+                const opt = document.createElement('option');
+                opt.value = task.task_id;
+                // Display: SYMBOL (ExchangeA-ExchangeB)
+                // e.g. XAUUSD (MT5-OKX)
+                opt.text = `${task.symbol || task.symbol_a} (${task.exchange_a}-${task.exchange_b})`;
+                if (task.task_id === currentSelection) {
+                    opt.selected = true;
+                    foundCurrent = true;
+                }
+                selector.appendChild(opt);
+            });
+            
+            // If current selection is not in list (e.g. was default 'mt5-okx-xau' but actual is different), pick first
+            if (!foundCurrent && tasks.length > 0) {
+                // Check if we have a "better" match by symbol if ID changed?
+                // For now, just pick first
+                const first = tasks[0].task_id;
+                console.log(`Current task ${currentSelection} not found in list, switching to ${first}`);
+                currentTask = first;
+                // Reflect in UI
+                selector.value = first;
+                // Request data for new task
+                requestTaskData(currentTask);
+            } else if (foundCurrent) {
+                // Even if found, refresh data to be sure
+                 requestTaskData(currentTask);
+            }
+        }
+        
+        // EMA Freeze Logic
+        let lastEmaUpdateTime = 0;
+        let fixedEmaValue = 0;
+
         // Update threshold series with new data point (for real-time updates)
         function updateThresholdSeries(tick) {
             const ema = tick.ema;
@@ -1248,30 +1325,48 @@
             if (ema === null || ema === undefined || !time) return;
             
             const OFFSET_SECONDS = 8 * 3600;
-            const adjustedTime = time + OFFSET_SECONDS;
+            // Spread updates in real-time (tick time)
+            
+            // EMA and Thresholds snap to the minute start (bar_time)
+            // This prevents the lines from extending into the forming minute
+            const barTime = tick.bar_time ? (tick.bar_time + OFFSET_SECONDS) : (time + OFFSET_SECONDS);
+            
+            // Logic: EMA update only happens at the start of 1m
+            if (barTime !== lastEmaUpdateTime) {
+                lastEmaUpdateTime = barTime;
+                fixedEmaValue = ema;
+            }
+            // Otherwise use fixedEmaValue (no intra-candle updates for EMA lines)
             
             const firstSpread = currentParams.firstSpread || 3.0;
             const nextSpread = currentParams.nextSpread || 1.0;
             const maxPos = currentParams.maxPos || 3;
             
-            // Update EMA series
-            if (emaSellSeries) emaSellSeries.update({ time: adjustedTime, value: ema });
-            if (emaBuySeries) emaBuySeries.update({ time: adjustedTime, value: ema });
+            // Update EMA series using BAR TIME (snapped to minute)
+            if (emaSellSeries) emaSellSeries.update({ time: barTime, value: fixedEmaValue });
+            if (emaBuySeries) emaBuySeries.update({ time: barTime, value: fixedEmaValue });
             
-            // Update L1-Ln threshold series
+            // Update L1-Ln threshold series using BAR TIME
             for (let i = 0; i < maxPos && i < sellThresholdSeries.length; i++) {
                 const offset = firstSpread + i * nextSpread;
-                const upperVal = ema + offset;
-                const lowerVal = ema - offset;
+                const upperVal = fixedEmaValue + offset;
+                const lowerVal = fixedEmaValue - offset;
                 
-                if (sellThresholdSeries[i]) sellThresholdSeries[i].update({ time: adjustedTime, value: upperVal });
-                if (buyThresholdSeries[i]) buyThresholdSeries[i].update({ time: adjustedTime, value: lowerVal });
+                if (sellThresholdSeries[i]) sellThresholdSeries[i].update({ time: barTime, value: upperVal });
+                if (buyThresholdSeries[i]) buyThresholdSeries[i].update({ time: barTime, value: lowerVal });
             }
         }
         
         // Set threshold series historical data
         function setThresholdSeriesData(emaData) {
             if (!emaData || emaData.length === 0) return;
+            
+            // Sync freeze variables with last history point
+            const last = emaData[emaData.length - 1];
+            if (last) {
+                lastEmaUpdateTime = last.time;
+                fixedEmaValue = last.value;
+            }
             
             const firstSpread = currentParams.firstSpread || 3.0;
             const nextSpread = currentParams.nextSpread || 1.0;
@@ -1396,7 +1491,7 @@
                 el.textContent = '均:' + tick.avg_spread_buy.toFixed(2);
                 el.style.color = tick.avg_spread_buy < ema ? '#ef5350' : '#4caf50';
             }
-            
+
             if (tick.ema !== null) {
                 document.getElementById('rt-ema').textContent = tick.ema.toFixed(2);
             }
@@ -1406,22 +1501,39 @@
         function setupTradeButtons() {
             const longHandler = () => {
                 const vol = document.getElementById('tradeVol').value;
+                // Send tradeVolume first (optional, but good for persistence)
                 ws.send(JSON.stringify({ type: 'params', payload: { tradeVolume: parseFloat(vol) } }));
-                setTimeout(() => ws.send(JSON.stringify({ type: 'make_long' })), 100);
-                addLog(`手动做多, 手数=${vol}`, 'info');
+                
+                // FIXED: Include task_id in the manual trade payload
+                setTimeout(() => ws.send(JSON.stringify({ 
+                    type: 'make_long', 
+                    task_id: currentTask 
+                })), 100);
+                
+                addLog(`手动做多 [${currentTask}], 手数=${vol}`, 'info');
             };
             
             const shortHandler = () => {
                 const vol = document.getElementById('tradeVol').value;
                 ws.send(JSON.stringify({ type: 'params', payload: { tradeVolume: parseFloat(vol) } }));
-                setTimeout(() => ws.send(JSON.stringify({ type: 'make_short' })), 100);
-                addLog(`手动做空, 手数=${vol}`, 'info');
+                
+                // FIXED: Include task_id in the manual trade payload
+                setTimeout(() => ws.send(JSON.stringify({ 
+                    type: 'make_short', 
+                    task_id: currentTask 
+                })), 100);
+                
+                addLog(`手动做空 [${currentTask}], 手数=${vol}`, 'info');
             };
             
             const closeAllHandler = () => {
-                if (confirm("确定要全部平仓吗？")) {
-                    ws.send(JSON.stringify({ type: 'close_all' }));
-                    addLog('全部平仓已触发', 'warn');
+                if (confirm(`确定要平仓任务 ${currentTask} 的所有仓位吗？`)) {
+                    // FIXED: Include task_id in close_all
+                    ws.send(JSON.stringify({ 
+                        type: 'close_all',
+                        task_id: currentTask
+                    }));
+                    addLog(`任务 ${currentTask} 全部平仓已触发`, 'warn');
                 }
             };
             
@@ -1632,7 +1744,7 @@
         // Refresh Order Logs button
         document.getElementById('refreshOrderLogs')?.addEventListener('click', () => {
             if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: 'get_order_logs', limit: 50 }));
+                ws.send(JSON.stringify({ type: 'get_order_logs', limit: 50, task_id: currentTask }));
                 addLog('正在获取订单日志...', 'info');
             }
         });
@@ -1805,6 +1917,23 @@
                 spreadBuySeries.update({ time: time, value: bar.spread_buy });
             }
             
+            // Sync EMA series with Bar Data (1m update)
+            if (bar.ema !== undefined) {
+                 if (emaSellSeries) emaSellSeries.update({ time: time, value: bar.ema });
+                 if (emaBuySeries) emaBuySeries.update({ time: time, value: bar.ema });
+                 
+                 // Also Update Thresholds
+                 const firstSpread = currentParams.firstSpread || 3.0;
+                 const nextSpread = currentParams.nextSpread || 1.0;
+                 const maxPos = currentParams.maxPos || 3;
+                 
+                 for (let i = 0; i < maxPos && i < sellThresholdSeries.length; i++) {
+                    const offset = firstSpread + i * nextSpread;
+                    if (sellThresholdSeries[i]) sellThresholdSeries[i].update({ time: time, value: bar.ema + offset });
+                    if (buyThresholdSeries[i]) buyThresholdSeries[i].update({ time: time, value: bar.ema - offset });
+                 }
+            }
+            
             if (globalSpreadData.length === 0 || globalSpreadData[globalSpreadData.length - 1].time !== time) {
                 globalSpreadData.push({ time: time, value: bar.spread_sell || bar.spread });
                 globalEmaData.push({ time: time, value: bar.ema });
@@ -1822,7 +1951,7 @@
         // Account Polling
         setInterval(() => {
             if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: "get_account" }));
+                ws.send(JSON.stringify({ type: "get_account", task_id: currentTask }));
             }
         }, 3000);
 

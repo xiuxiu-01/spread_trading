@@ -85,8 +85,12 @@ class SpreadTradingApp:
         # Start WebSocket server
         await self.server.start()
         
-        # Create default task (MT5 + OKX)
-        await self._create_default_task()
+        # Restore persisted tasks
+        await self.manager.restart_tasks()
+        
+        # Default task creation removed as per user request
+        # if not self.manager.tasks:
+        #     await self._create_default_task()
         
         self.running = True
         logger.info("Application started successfully")

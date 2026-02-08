@@ -1233,7 +1233,6 @@
                 renderOrderMarkers();
             } else if (msg.type === 'tick') {
                 updateRealtimeQuotes(msg.payload);
-                updateThresholdSeries(msg.payload);
             } else if (msg.type === 'trade_result') {
                 handleTradeResult(msg.payload);
             } else if (msg.type === 'order_logs') {
@@ -1241,6 +1240,10 @@
             }
         }
         
+        // EMA Freeze Logic
+        let lastEmaUpdateTime = 0;
+        let fixedEmaValue = 0;
+
         // Update threshold series with new data point (for real-time updates)
         function updateThresholdSeries(tick) {
             const ema = tick.ema;
@@ -1248,30 +1251,48 @@
             if (ema === null || ema === undefined || !time) return;
             
             const OFFSET_SECONDS = 8 * 3600;
-            const adjustedTime = time + OFFSET_SECONDS;
+            // Spread updates in real-time (tick time)
+            
+            // EMA and Thresholds snap to the minute start (bar_time)
+            // This prevents the lines from extending into the forming minute
+            const barTime = tick.bar_time ? (tick.bar_time + OFFSET_SECONDS) : (time + OFFSET_SECONDS);
+            
+            // Logic: EMA update only happens at the start of 1m
+            if (barTime !== lastEmaUpdateTime) {
+                lastEmaUpdateTime = barTime;
+                fixedEmaValue = ema;
+            }
+            // Otherwise use fixedEmaValue (no intra-candle updates for EMA lines)
             
             const firstSpread = currentParams.firstSpread || 3.0;
             const nextSpread = currentParams.nextSpread || 1.0;
             const maxPos = currentParams.maxPos || 3;
             
-            // Update EMA series
-            if (emaSellSeries) emaSellSeries.update({ time: adjustedTime, value: ema });
-            if (emaBuySeries) emaBuySeries.update({ time: adjustedTime, value: ema });
+            // Update EMA series using BAR TIME (snapped to minute)
+            if (emaSellSeries) emaSellSeries.update({ time: barTime, value: fixedEmaValue });
+            if (emaBuySeries) emaBuySeries.update({ time: barTime, value: fixedEmaValue });
             
-            // Update L1-Ln threshold series
+            // Update L1-Ln threshold series using BAR TIME
             for (let i = 0; i < maxPos && i < sellThresholdSeries.length; i++) {
                 const offset = firstSpread + i * nextSpread;
-                const upperVal = ema + offset;
-                const lowerVal = ema - offset;
+                const upperVal = fixedEmaValue + offset;
+                const lowerVal = fixedEmaValue - offset;
                 
-                if (sellThresholdSeries[i]) sellThresholdSeries[i].update({ time: adjustedTime, value: upperVal });
-                if (buyThresholdSeries[i]) buyThresholdSeries[i].update({ time: adjustedTime, value: lowerVal });
+                if (sellThresholdSeries[i]) sellThresholdSeries[i].update({ time: barTime, value: upperVal });
+                if (buyThresholdSeries[i]) buyThresholdSeries[i].update({ time: barTime, value: lowerVal });
             }
         }
         
         // Set threshold series historical data
         function setThresholdSeriesData(emaData) {
             if (!emaData || emaData.length === 0) return;
+            
+            // Sync freeze variables with last history point
+            const last = emaData[emaData.length - 1];
+            if (last) {
+                lastEmaUpdateTime = last.time;
+                fixedEmaValue = last.value;
+            }
             
             const firstSpread = currentParams.firstSpread || 3.0;
             const nextSpread = currentParams.nextSpread || 1.0;
@@ -1396,7 +1417,7 @@
                 el.textContent = '均:' + tick.avg_spread_buy.toFixed(2);
                 el.style.color = tick.avg_spread_buy < ema ? '#ef5350' : '#4caf50';
             }
-            
+
             if (tick.ema !== null) {
                 document.getElementById('rt-ema').textContent = tick.ema.toFixed(2);
             }
@@ -1803,6 +1824,23 @@
             
             if (bar.spread_buy !== undefined && spreadBuySeries) {
                 spreadBuySeries.update({ time: time, value: bar.spread_buy });
+            }
+            
+            // Sync EMA series with Bar Data (1m update)
+            if (bar.ema !== undefined) {
+                 if (emaSellSeries) emaSellSeries.update({ time: time, value: bar.ema });
+                 if (emaBuySeries) emaBuySeries.update({ time: time, value: bar.ema });
+                 
+                 // Also Update Thresholds
+                 const firstSpread = currentParams.firstSpread || 3.0;
+                 const nextSpread = currentParams.nextSpread || 1.0;
+                 const maxPos = currentParams.maxPos || 3;
+                 
+                 for (let i = 0; i < maxPos && i < sellThresholdSeries.length; i++) {
+                    const offset = firstSpread + i * nextSpread;
+                    if (sellThresholdSeries[i]) sellThresholdSeries[i].update({ time: time, value: bar.ema + offset });
+                    if (buyThresholdSeries[i]) buyThresholdSeries[i].update({ time: time, value: bar.ema - offset });
+                 }
             }
             
             if (globalSpreadData.length === 0 || globalSpreadData[globalSpreadData.length - 1].time !== time) {

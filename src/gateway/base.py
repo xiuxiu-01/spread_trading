@@ -103,15 +103,19 @@ class BaseGateway(ABC):
     async def get_klines(
         self, 
         timeframe: str = "1m", 
-        limit: int = 100
+        limit: int = 100,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None
     ) -> List[Dict[str, Any]]:
         """
         Get historical kline/candlestick data.
-        
+
         Args:
             timeframe: Timeframe (e.g., "1m", "5m", "1h")
             limit: Number of candles to fetch
-        
+            start_time: Start timestamp (seconds)
+            end_time: End timestamp (seconds)
+
         Returns:
             List of OHLCV dictionaries.
         """

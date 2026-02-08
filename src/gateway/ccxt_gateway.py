@@ -308,19 +308,73 @@ class CCXTGateway(BaseGateway):
     async def get_klines(
         self,
         timeframe: str = "1m",
-        limit: int = 100
+        limit: int = 100,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None
     ) -> List[Dict[str, Any]]:
-        """Get historical klines."""
+        """Get historical klines with pagination."""
         if not self._exchange:
             return []
         
         try:
-            ohlcv = await self._exchange.fetch_ohlcv(
-                self.symbol,
-                timeframe=timeframe,
-                limit=limit
-            )
+            # CCXT expects milliseconds
+            since = start_time * 1000 if start_time else None
+            end_ts_ms = end_time * 1000 if end_time else None
             
+            all_ohlcv = []
+            remaining = limit
+            current_since = since
+            
+            # Map timeframe to milliseconds for incrementing `since`
+            tf_seconds = self._exchange.parse_timeframe(timeframe)
+            tf_ms = tf_seconds * 1000
+
+            while remaining > 0:
+                # Some exchanges limit to 100 or 300 per request. 
+                # Requesting larger batches than exchange limit will just return limit.
+                # We request up to 1000, assuming CCXT/Exchange truncates as needed.
+                batch_limit = min(remaining, 1000) 
+                
+                batch = await self._exchange.fetch_ohlcv(
+                    self.symbol,
+                    timeframe=timeframe,
+                    limit=batch_limit,
+                    since=current_since
+                )
+                
+                if not batch:
+                    break
+                    
+                # If we have an end_time, filter out bars beyond it
+                if end_ts_ms:
+                    batch = [b for b in batch if b[0] <= end_ts_ms]
+                    if not batch:
+                        break
+                
+                all_ohlcv.extend(batch)
+                remaining -= len(batch)
+                
+                # Update since for next batch (last bar time + 1 timeframe)
+                last_bar_time = batch[-1][0]
+                current_since = last_bar_time + tf_ms
+                
+                # If we got fewer bars than requested in this batch (and didn't ask for huge amount),
+                # we probably reached head of market data
+                if len(batch) < batch_limit and len(batch) < 100: # heuristic
+                     # However, be careful: if we asked for 50 and got 50, we might need more.
+                     # If we asked for 1000 and got 100 (exchange limit), we continue.
+                     # If we asked for 1000 and got 5, we are done.
+                     if len(batch) < 100: # Assuming 100 is a common low limit
+                         break
+                
+                # Safety break for infinite loops if exchange implies strict limits
+                if len(all_ohlcv) >= limit:
+                    break
+            
+            # Trim if exceeded
+            if len(all_ohlcv) > limit:
+                all_ohlcv = all_ohlcv[:limit]
+
             return [{
                 "time": int(bar[0] / 1000),  # Convert ms to seconds
                 "open": float(bar[1]),
@@ -328,7 +382,7 @@ class CCXTGateway(BaseGateway):
                 "low": float(bar[3]),
                 "close": float(bar[4]),
                 "volume": float(bar[5])
-            } for bar in ohlcv]
+            } for bar in all_ohlcv]
             
         except Exception as e:
             logger.error(f"{self.name} get_klines error: {e}")
