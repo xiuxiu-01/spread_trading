@@ -3,7 +3,7 @@ Arbitrage Manager - Manages multiple arbitrage tasks.
 """
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Callable, Awaitable, Any
 
 from ..models import ArbitrageTask, ArbitrageStatus, Order
@@ -469,15 +469,29 @@ class ArbitrageManager:
         
         logger.info(f"Starting kline loop for {task_id}")
         
+        # Track last processed bar timestamp to avoid duplicates
+        last_bar_ts = 0
+        
         while task.is_active:
             try:
-                # Wait for next minute
+                # Wait for next minute + 5 seconds buffer (ensure bar is closed on both exchanges)
                 now = datetime.now()
-                wait_seconds = 60 - now.second
+                wait_seconds = 60 - now.second + 5
+                if wait_seconds > 60:
+                    wait_seconds -= 60
                 await asyncio.sleep(wait_seconds)
                 
-                # Fetch new kline
-                await self._update_kline(task_id)
+                # Fetch new kline with retry
+                success = await self._update_kline_with_retry(task_id, last_bar_ts)
+                if success:
+                    # Update last processed timestamp
+                    agg = self.aggregators.get(task_id)
+                    if agg and agg.times:
+                        try:
+                            last_ts_str = agg.times[-1]
+                            last_bar_ts = int(datetime.fromisoformat(last_ts_str.replace('Z', '+00:00')).timestamp())
+                        except:
+                            pass
                 
             except asyncio.CancelledError:
                 break
@@ -486,9 +500,28 @@ class ArbitrageManager:
                 await asyncio.sleep(5)
         
         logger.info(f"Kline loop stopped for {task_id}")
-    
-    async def _update_kline(self, task_id: str):
-        """Update kline data."""
+
+    async def _update_kline_with_retry(self, task_id: str, last_bar_ts: int, max_retries: int = 3) -> bool:
+        """Update kline data with retry mechanism."""
+        for attempt in range(max_retries):
+            try:
+                result = await self._update_kline(task_id, last_bar_ts)
+                if result:
+                    return True
+                
+                # Wait before retry
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(2)
+                    
+            except Exception as e:
+                logger.warning(f"Kline update attempt {attempt + 1} failed for {task_id}: {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(2)
+        
+        return False
+
+    async def _update_kline(self, task_id: str, last_bar_ts: int = 0) -> bool:
+        """Update kline data with improved reliability."""
         gateways = self.gateways.get(task_id, {})
         gw_a = gateways.get("a")
         gw_b = gateways.get("b")
@@ -496,11 +529,10 @@ class ArbitrageManager:
         task = self.tasks.get(task_id)
         
         if not all([gw_a, gw_b, agg, task]):
-            return
+            return False
         
         try:
             # Check market hours (MT5) before updating
-            # Assuming gw_a is MT5
             is_open = False
             if hasattr(gw_a, 'is_market_open'):
                 if asyncio.iscoroutinefunction(gw_a.is_market_open):
@@ -510,40 +542,76 @@ class ArbitrageManager:
             
             if not is_open:
                  logger.debug(f"Market closed for {task_id}, skipping kline update")
-                 return
+                 return False
 
-            # Get latest klines (1m)
-            # Fetching 2 bars to ensure we get a CLOSED bar (previous minute)
-            klines_a = await gw_a.get_klines(timeframe="1m", limit=2)
-            klines_b = await gw_b.get_klines(timeframe="1m", limit=2)
+            # Current minute boundary (any bar >= this is still forming)
+            now_ts = int(datetime.now(timezone.utc).timestamp())
+            current_minute_start = (now_ts // 60) * 60
+
+            # Get latest klines (1m) - fetch 5 bars for better reliability
+            klines_a = await gw_a.get_klines(timeframe="1m", limit=5)
+            klines_b = await gw_b.get_klines(timeframe="1m", limit=5)
             
-            if klines_a and klines_b:
-                # Use the second to last bar (completed bar)
-                # If we only get 1 bar, it might be the current forming bar
-                if len(klines_a) > 1 and len(klines_b) > 1:
-                    bar_a = klines_a[-2]
-                    bar_b = klines_b[-2]
-                else:
-                    # Fallback to last available if not enough history
-                    bar_a = klines_a[-1]
-                    bar_b = klines_b[-1]
+            if not klines_a:
+                logger.warning(f"{task_id}: MT5 returned no klines")
+                return False
+            if not klines_b:
+                logger.warning(f"{task_id}: OKX returned no klines")
+                return False
+            
+            # Filter out current (forming) bar from both exchanges
+            # Keep only bars that started before current minute
+            closed_a = [b for b in klines_a if (b.get('time') or 0) < current_minute_start]
+            closed_b = [b for b in klines_b if (b.get('time') or 0) < current_minute_start]
+            
+            if not closed_a:
+                logger.warning(f"{task_id}: MT5 has no closed bars (current_min={current_minute_start})")
+                return False
+            if not closed_b:
+                logger.warning(f"{task_id}: OKX has no closed bars (current_min={current_minute_start})")
+                return False
+            
+            # Use the most recent CLOSED bar from each exchange
+            bar_a = closed_a[-1]
+            ts_a = bar_a.get('time') or bar_a.get('ts')
+            
+            # Check if this bar was already processed
+            if ts_a and ts_a <= last_bar_ts:
+                logger.debug(f"{task_id}: Bar {ts_a} already processed")
+                return False
+            
+            # Find matching OKX bar by timestamp
+            bar_b = None
+            ts_a_minute = (ts_a // 60) * 60 if ts_a else 0
+            
+            for okx_bar in reversed(closed_b):
+                ts_b = okx_bar.get('time') or okx_bar.get('ts')
+                ts_b_minute = (ts_b // 60) * 60 if ts_b else 0
                 
-                # Verify timestamps match (within reasonable tolerance)
-                ts_a = bar_a.get('time') or bar_a.get('ts')
-                ts_b = bar_b.get('time') or bar_b.get('ts')
-                
-                # Get current bid/ask for spread calculation
-                tick_a = await gw_a.get_ticker()
-                tick_b = await gw_b.get_ticker()
-                
-                if tick_a and tick_b:
-                    avg_sell, avg_buy, _ = agg.get_rolling_average()
-                    
-                    # Use rolling average for bar spread
-                    # Use MT5 bar timestamp for consistency
-                    ts_val = ts_a or datetime.now().timestamp()
-                    t_iso = datetime.fromtimestamp(ts_val, timezone.utc).isoformat()
-                    
+                # Exact minute match
+                if ts_a_minute == ts_b_minute:
+                    bar_b = okx_bar
+                    break
+            
+            if not bar_b:
+                # If no exact match, use OKX's most recent closed bar
+                bar_b = closed_b[-1]
+                ts_b = bar_b.get('time') or 0
+                logger.debug(f"{task_id}: No exact OKX match for MT5 ts={ts_a}, using OKX ts={ts_b}")
+            
+            # Get current tick for spread calculation (or use rolling average)
+            avg_sell, avg_buy, _ = agg.get_rolling_average()
+            
+            # Use MT5 bar timestamp for consistency
+            ts_val = ts_a or int(datetime.now().timestamp())
+            # 转为东八区本地时间字符串，无时区后缀
+            dt = datetime.fromtimestamp(ts_val, timezone.utc) + timedelta(hours=8)
+            t_iso = dt.replace(tzinfo=None).isoformat()
+            
+            # 如果已存在该 timestamp，则替换为最新数据，否则正常添加
+            if hasattr(agg, 'bars') and hasattr(agg, 'times'):
+                if t_iso in agg.times:
+                    idx = agg.times.index(t_iso)
                     bar = agg.add_bar(
                         timestamp=t_iso,
                         mt5_bar=bar_a,
@@ -551,17 +619,33 @@ class ArbitrageManager:
                         spread_sell=avg_sell,
                         spread_buy=avg_buy
                     )
-                    
-                    if self._on_bar:
-                        await self._on_bar(task_id, bar)
-                    
-                    logger.debug(f"New bar for {task_id}: spread={bar['spread']:.2f}")
-
-                    # Check signals moved back to tick loop as per requirement "Open/Close is tick triggered"
-                    # logic remains consistent using agg.last_ema which updates here
+                    agg.bars[idx] = bar
+                else:
+                    bar = agg.add_bar(
+                        timestamp=t_iso,
+                        mt5_bar=bar_a,
+                        okx_bar=bar_b,
+                        spread_sell=avg_sell,
+                        spread_buy=avg_buy
+                    )
+            else:
+                bar = agg.add_bar(
+                    timestamp=t_iso,
+                    mt5_bar=bar_a,
+                    okx_bar=bar_b,
+                    spread_sell=avg_sell,
+                    spread_buy=avg_buy
+                )
+            
+            if self._on_bar:
+                await self._on_bar(task_id, bar)
+            
+            logger.info(f"New bar for {task_id}: ts={t_iso}, spread={bar['spread']:.2f}, ema={bar['ema']:.2f}")
+            return True
         
         except Exception as e:
             logger.error(f"Kline update error for {task_id}: {e}")
+            return False
     
     async def _check_signals(self, task_id: str, spread_sell: float, spread_buy: float):
         """Check and execute trading signals."""
@@ -675,65 +759,61 @@ class ArbitrageManager:
             dry_run=dry_run,
             qty_multiplier=qty_multiplier
         )
+    
+        # Recalculate PnL and trades count only on closing/full cycle
+        # For now, just mark last_trade_at
+        task.last_trade_at = datetime.now()
         
-        if result["success"]:
-            # Recalculate PnL and trades count only on closing/full cycle
-            # For now, just mark last_trade_at
-            task.last_trade_at = datetime.now()
-            
-            task.current_level = target_level
-            task.direction = signal.type.value
-            
-            # Persist task state (important for level tracking)
-            task_persistence.save_tasks(self.tasks)
-            
-            # Get current tick prices for complete logging
-            tick_a = gw_a.last_tick if hasattr(gw_a, 'last_tick') and gw_a.last_tick else None
-            tick_b = gw_b.last_tick if hasattr(gw_b, 'last_tick') and gw_b.last_tick else None
-            
-            # Construct Composite Trade Log for Auto Trade
-            # Build reason string with details
-            if is_reversal:
-                reason_str = f"自动反转: 平{close_volume}手 + 开{open_volume}手 | {signal.reason}"
-            else:
-                reason_str = signal.reason
-            
-            trade_record = {
-                 "task_id": task_id,
-                 "ts": datetime.now(timezone.utc).isoformat(),
-                 "order_id": int(datetime.now().timestamp() * 1000),
-                 "direction": signal.type.value,
-                 "level": signal.level,
-                 "vol": trade_volume,
-                 "status": "filled_all",
-                 "prices": {
-                     "spread_sell": getattr(signal, 'spread_sell', 0) or signal.spread,
-                     "spread_buy": getattr(signal, 'spread_buy', 0),
-                     "mt5_bid": tick_a.bid if tick_a else 0,
-                     "mt5_ask": tick_a.ask if tick_a else 0,
-                     "okx_bid": tick_b.bid if tick_b else 0,
-                     "okx_ask": tick_b.ask if tick_b else 0,
-                 },
-                 "ema": signal.ema if hasattr(signal, 'ema') else 0,
-                 "signal": {
-                     "trigger": "auto_reversal" if is_reversal else "auto",
-                     "action": signal.type.value,
-                     "level": signal.level,
-                     "reason": reason_str,
-                     "threshold": signal.threshold if hasattr(signal, 'threshold') else 0
-                 },
-                 "mt5_result": result.get("order_a", {}),
-                 "okx_result": result.get("order_b", {}),
-                 "error": None
-            }
-             
-            self.order_service.log_composite_trade(trade_record)
-            
-            if self._on_trade:
-                await self._on_trade(task_id, trade_record)
+        task.current_level = target_level
+        task.direction = signal.type.value
+        
+        # Persist task state (important for level tracking)
+        task_persistence.save_tasks(self.tasks)
+        
+        # Get current tick prices for complete logging
+        tick_a = gw_a.last_tick if hasattr(gw_a, 'last_tick') and gw_a.last_tick else None
+        tick_b = gw_b.last_tick if hasattr(gw_b, 'last_tick') and gw_b.last_tick else None
+        
+        # Construct Composite Trade Log for Auto Trade
+        # Build reason string with details
+        if is_reversal:
+            reason_str = f"自动反转: 平{close_volume}手 + 开{open_volume}手 | {signal.reason}"
         else:
-            logger.error(f"Trade execution failed for {task_id}: {result.get('error')}")
-
+            reason_str = signal.reason
+        
+        trade_record = {
+            "task_id": task_id,
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "order_id": int(datetime.now().timestamp() * 1000),
+            "direction": signal.type.value,
+            "level": signal.level,
+            "vol": trade_volume,
+            "status": bool(result.get("success", False)),
+            "prices": {
+                "spread_sell": getattr(signal, 'spread_sell', 0) or signal.spread,
+                "spread_buy": getattr(signal, 'spread_buy', 0),
+                "mt5_bid": tick_a.bid if tick_a else 0,
+                "mt5_ask": tick_a.ask if tick_a else 0,
+                "okx_bid": tick_b.bid if tick_b else 0,
+                "okx_ask": tick_b.ask if tick_b else 0,
+            },
+            "ema": signal.ema if hasattr(signal, 'ema') else 0,
+            "signal": {
+                "trigger": "auto_reversal" if is_reversal else "auto",
+                "action": signal.type.value,
+                "level": signal.level,
+                "reason": reason_str,
+                "threshold": signal.threshold if hasattr(signal, 'threshold') else 0
+            },
+            "mt5_result": result.get("order_a", {}),
+            "okx_result": result.get("order_b", {}),
+            "error": None
+        }
+            
+        self.order_service.log_composite_trade(trade_record)
+        
+        if self._on_trade:
+            await self._on_trade(task_id, trade_record)
     async def execute_manual_trade(self, task_id: str, direction: str, volume: Optional[float] = None) -> Dict[str, Any]:
         """
         Execute a manual trade.
@@ -792,81 +872,80 @@ class ArbitrageManager:
             qty_multiplier=qty_multiplier
         )
         
-        if result["success"]:
              # Update Task State
              # For reversal: set to level 1 in new direction
              # For same direction: increment level
-             if is_reversal:
-                 task.direction = direction
-                 task.current_level = 1
-             elif task.direction == direction:
-                 task.current_level += 1
-             else:
-                 # First position
-                 task.direction = direction
-                 task.current_level = 1
-                 
-             task.last_trade_at = datetime.now()
-             task_persistence.save_tasks(self.tasks)
-             
-             # Construct Composite Trade Log
-             
-             # Fetch current tickers for logging accurate prices
-             tick_a = await gw_a.get_ticker()
-             tick_b = await gw_b.get_ticker()
-             
-             current_prices = {
-                 "mt5_bid": tick_a.bid if tick_a else 0, 
-                 "mt5_ask": tick_a.ask if tick_a else 0, 
-                 "okx_bid": tick_b.bid if tick_b else 0, 
-                 "okx_ask": tick_b.ask if tick_b else 0,
-             }
-             
-             # Calculate spreads from these ticks
-             if tick_a and tick_b:
-                 current_prices["spread_sell"] = tick_a.bid - tick_b.ask
-                 current_prices["spread_buy"] = tick_a.ask - tick_b.bid
-             else:
-                 current_prices["spread_sell"] = 0
-                 current_prices["spread_buy"] = 0
-             
-             # Build reason string with details
-             if is_reversal:
-                 reason_str = f"手动反转: 平{close_volume}手 + 开{open_volume}手"
-             else:
-                 reason_str = "手动交易"
-             
-             trade_record = {
-                 "task_id": task_id,
-                 "ts": datetime.now(timezone.utc).isoformat(),
-                 "order_id": int(datetime.now().timestamp() * 1000),
-                 "direction": direction,
-                 "level": task.current_level,
-                 "vol": trade_volume,
-                 "status": "filled_all",
-                 "prices": current_prices,
-                 "ema": 0, # Placeholder
-                 "signal": {
-                     "trigger": "manual_reversal" if is_reversal else "manual",
-                     "action": direction,
-                     "level": task.current_level,
-                     "reason": reason_str
-                 },
-                 "mt5_result": result.get("order_a", {}),
-                 "okx_result": result.get("order_b", {}),
-                 "error": None
-             }
-             
-             # Get latest market data if available
-             agg = self.aggregators.get(task_id)
-             if agg:
-                 trade_record["ema"] = agg.last_ema
-                 # We could fetch latest spreads from agg or gateways if needed
-             
-             self.order_service.log_composite_trade(trade_record)
-             
-             if self._on_trade:
-                await self._on_trade(task_id, trade_record)
+        if is_reversal:
+            task.direction = direction
+            task.current_level = 1
+        elif task.direction == direction:
+            task.current_level += 1
+        else:
+            # First position
+            task.direction = direction
+            task.current_level = 1
+            
+        task.last_trade_at = datetime.now()
+        task_persistence.save_tasks(self.tasks)
+        
+        # Construct Composite Trade Log
+        
+        # Fetch current tickers for logging accurate prices
+        tick_a = await gw_a.get_ticker()
+        tick_b = await gw_b.get_ticker()
+        
+        current_prices = {
+            "mt5_bid": tick_a.bid if tick_a else 0, 
+            "mt5_ask": tick_a.ask if tick_a else 0, 
+            "okx_bid": tick_b.bid if tick_b else 0, 
+            "okx_ask": tick_b.ask if tick_b else 0,
+        }
+        
+        # Calculate spreads from these ticks
+        if tick_a and tick_b:
+            current_prices["spread_sell"] = tick_a.bid - tick_b.ask
+            current_prices["spread_buy"] = tick_a.ask - tick_b.bid
+        else:
+            current_prices["spread_sell"] = 0
+            current_prices["spread_buy"] = 0
+        
+        # Build reason string with details
+        if is_reversal:
+            reason_str = f"手动反转: 平{close_volume}手 + 开{open_volume}手"
+        else:
+            reason_str = "手动交易"
+        
+        trade_record = {
+            "task_id": task_id,
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "order_id": int(datetime.now().timestamp() * 1000),
+            "direction": direction,
+            "level": task.current_level,
+            "vol": trade_volume,
+            "status": bool(result.get("success", False)),
+            "prices": current_prices,
+            "ema": 0, # Placeholder
+            "signal": {
+                "trigger": "manual_reversal" if is_reversal else "manual",
+                "action": direction,
+                "level": task.current_level,
+                "reason": reason_str
+            },
+            "mt5_result": result.get("order_a", {}),
+            "okx_result": result.get("order_b", {}),
+            "error": None
+        }
+        
+        # Get latest market data if available
+        agg = self.aggregators.get(task_id)
+        if agg:
+            trade_record["ema"] = agg.last_ema
+            # We could fetch latest spreads from agg or gateways if needed
+        
+        self.order_service.log_composite_trade(trade_record)
+        
+        if self._on_trade:
+            await self._on_trade(task_id, trade_record)
         
         return result
     
@@ -976,3 +1055,8 @@ class ArbitrageManager:
                     **gw.get_info()
                 })
         return status
+
+    async def close_all_positions(self):
+        """批量全平所有任务的持仓（OKX/MT5）"""
+        for task_id in self.tasks.keys():
+            await self._close_position(task_id)

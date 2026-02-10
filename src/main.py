@@ -48,6 +48,7 @@ class SpreadTradingApp:
         )
         
         self.handler = None
+        self._monitor_task: Optional[asyncio.Task] = None
     
     async def start(self):
         """Start the application."""
@@ -87,6 +88,9 @@ class SpreadTradingApp:
         
         # Restore persisted tasks
         await self.manager.restart_tasks()
+
+        # Start monitor task to log runtime metrics periodically
+        self._monitor_task = asyncio.create_task(self._monitor_loop())
         
         # Default task creation removed as per user request
         # if not self.manager.tasks:
@@ -201,6 +205,71 @@ class SpreadTradingApp:
         
         logger.info("Application stopped")
 
+    async def _monitor_loop(self, interval: int = 300):
+        """Periodic runtime monitor to help diagnose long-running leaks.
+
+        Logs:
+        - threading active count
+        - asyncio all_tasks count
+        - websocket client count
+        - number of gateways and their statuses
+        - optional psutil stats (if psutil installed)
+        """
+        import threading
+        try:
+            import psutil
+        except Exception:
+            psutil = None
+
+        while self.running:
+            try:
+                # Threading
+                tcount = threading.active_count()
+
+                # Asyncio tasks
+                try:
+                    task_count = len(asyncio.all_tasks())
+                except Exception:
+                    task_count = 0
+
+                # WebSocket clients
+                ws_clients = self.server.client_count if hasattr(self.server, 'client_count') else 0
+
+                # Gateways info
+                gw_count = 0
+                gw_statuses = {}
+                try:
+                    gw_dict = getattr(self.manager, 'gateways', {})
+                    gw_count = sum(len(v) for v in gw_dict.values())
+                    for tid, gws in (gw_dict.items() if isinstance(gw_dict, dict) else []):
+                        for side, gw in gws.items():
+                            key = f"{tid}:{side}:{getattr(gw, 'name', 'gw')}"
+                            gw_statuses[key] = getattr(gw, 'status', None).value if getattr(gw, 'status', None) else str(getattr(gw, 'status', None))
+                except Exception:
+                    gw_count = 0
+
+                info_parts = [f"threads={tcount}", f"async_tasks={task_count}", f"ws_clients={ws_clients}", f"gateways={gw_count}"]
+                if gw_statuses:
+                    info_parts.append(f"gw_statuses={list(gw_statuses.items())[:6]}")
+
+                # psutil details if available
+                if psutil:
+                    proc = psutil.Process()
+                    try:
+                        fds = getattr(proc, 'num_fds', lambda: None)()
+                    except Exception:
+                        fds = None
+                    conns = len(proc.connections()) if hasattr(proc, 'connections') else None
+                    info_parts.append(f"fds={fds}")
+                    info_parts.append(f"conns={conns}")
+
+                logger.info("[monitor] " + " | ".join(str(p) for p in info_parts))
+
+            except Exception as e:
+                logger.warning(f"Monitor loop error: {e}")
+
+            await asyncio.sleep(interval)
+
 
 async def main():
     """Main entry point."""
@@ -212,9 +281,9 @@ async def main():
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     args = parser.parse_args()
     
-    # Setup logging
+    # Setup logging (write to console and to data/app.log)
     log_level = "DEBUG" if args.debug else "INFO"
-    setup_logging(level=log_level)
+    setup_logging(level=log_level, log_file=settings.data_dir / "app.log")
     
     # Update settings
     settings.server.host = args.host

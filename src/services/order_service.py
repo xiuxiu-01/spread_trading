@@ -168,13 +168,14 @@ class OrderService:
             result["order_a"] = order_a.to_dict()
             result["order_b"] = order_b.to_dict()
             
-            # Check if both filled
-            if order_a.status == OrderStatus.FILLED and order_b.status == OrderStatus.FILLED:
+            # Consider SUBMITTED or FILLED on both sides as a successful execution
+            success_states = (OrderStatus.FILLED, OrderStatus.SUBMITTED)
+            if order_a.status in success_states and order_b.status in success_states:
                 result["success"] = True
-                logger.info(f"Arbitrage orders executed: {direction} A:{volume_a} B:{volume_b}")
+                logger.info(f"Arbitrage orders executed (submitted/filled): {direction} A:{volume_a} B:{volume_b}")
             else:
-                result["error"] = "One or both orders not filled"
-                logger.warning(f"Partial fill: A={order_a.status.value}, B={order_b.status.value}")
+                result["error"] = "One or both orders not submitted/filled"
+                logger.warning(f"Partial/not-complete: A={order_a.status.value}, B={order_b.status.value}")
             
             # Save to history
             self._save_order(order_a)

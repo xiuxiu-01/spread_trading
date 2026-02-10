@@ -12,6 +12,7 @@
             --text-primary: #c9d1d9;
             --text-secondary: #8b949e;
             --accent: #58a6ff;
+            --yellow: #d29922;
             --border: #30363d;
             --green: #238636;
             --red: #da3633;
@@ -397,6 +398,66 @@
         .order-log-dir.short {
             background: rgba(218, 54, 51, 0.3);
             color: var(--red);
+        }
+
+        .order-details-btn {
+            background: transparent;
+            border: 1px solid var(--border);
+            color: var(--text);
+            padding: 4px 8px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.8rem;
+        }
+        .order-details-btn:hover { opacity: 0.95; }
+
+        /* Modal styles */
+        .order-modal {
+            position: fixed;
+            left: 0;
+            top: 0;
+            width: 100vw;
+            height: 100vh;
+            background: rgba(0,0,0,0.5);
+            z-index: 9999;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+            overflow-y: auto;
+            overflow-x: hidden;
+        }
+        .order-modal-content {
+            background: #0f1720;
+            color: var(--text-primary);
+            border-radius: 8px;
+            width: 100%;
+            max-width: 900px;
+            max-height: 80vh;
+            overflow-y: auto;
+            overflow-x: hidden;
+            box-shadow: 0 6px 30px rgba(0,0,0,0.6);
+            border: 1px solid var(--border);
+        }
+        .order-modal-header {
+            display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-bottom:1px solid var(--border);
+        }
+        .order-modal-tabs { padding: 8px 16px; border-bottom: 1px solid var(--border); display:flex; gap:12px; align-items:center; }
+        .order-modal-body { padding: 12px 16px; display: grid; gap: 12px; }
+        .order-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+        .order-section { background: var(--card-bg); padding: 10px; border-radius:6px; border:1px solid var(--border); }
+        .order-section h4 { margin:0 0 8px 0; font-size:0.95rem; color:var(--text-primary); }
+        .order-kv { display:flex; justify-content:space-between; padding:4px 0; color:var(--text-secondary); font-size:0.9rem; }
+        .order-kv .v { color: var(--text-primary); }
+        .order-pre { background: #071019; padding:8px; border-radius:4px; font-family: monospace; font-size:0.85rem; color:var(--text-secondary); max-height:220px; overflow:auto; }
+        .badge-success { color: var(--green); font-weight:600; }
+        .badge-fail { color: var(--red); font-weight:600; }
+        .badge-warn { color: var(--yellow); font-weight:600; }
+
+        /* Responsive: on narrow screens stack columns vertically to avoid horizontal scroll */
+        @media (max-width: 760px) {
+            .order-row { grid-template-columns: 1fr; }
+            .order-modal-content { max-width: 98%; margin: 6vh auto; }
         }
         
         .order-log-prices {
@@ -1697,27 +1758,27 @@
                 const dir = o.direction || '--';
                 const level = o.level || 1;
                 const vol = o.vol || '--';
-                const status = o.status || '--';
+                const status = typeof o.status === 'boolean' ? (o.status ? '成功' : '失败') : o.status;
                 const prices = o.prices || {};
                 const signal = o.signal || {};
                 const ema = o.ema;
                 const mt5Pnl = o.mt5_pnl || 0;
                 const okxPnl = o.okx_pnl || 0;
                 const itemPnl = mt5Pnl + okxPnl;
-                
+
                 const pnlClass = itemPnl > 0 ? 'pnl-positive' : (itemPnl < 0 ? 'pnl-negative' : 'pnl-zero');
-                
+
                 let statusHtml = '';
-                if (status === 'filled_all') {
+                if (status === '成功') {
                     statusHtml = '<span style="color: var(--green);">✓ 成交</span>';
-                } else if (status.includes('failed')) {
-                    statusHtml = `<span style="color: var(--red);">✗ ${status}</span>`;
+                } else if (status === '失败') {
+                    statusHtml = `<span style="color: var(--red);">✗ 失败</span>`;
                 } else if (status.includes('skipped')) {
                     statusHtml = `<span style="color: #d29922;">⊘ ${status}</span>`;
                 } else {
                     statusHtml = `<span>${status}</span>`;
                 }
-                
+
                 // 生成触发条件描述
                 let triggerDesc = '';
                 if (signal.trigger === 'manual' || signal.trigger === 'manual_reversal') {
@@ -1729,7 +1790,7 @@
                     const action = signal.action === 'short' ? '做空' : '做多';
                     const triggerLabel = isReversal ? `🔄 自动反转 → ${action}` : `⚡ 自动${action}`;
                     const reasonText = signal.reason || '';
-                    
+
                     triggerDesc = `
                         <div class="trigger-desc auto">
                             ${triggerLabel} L${level}
@@ -1738,7 +1799,10 @@
                 } else if (signal.trigger) {
                     triggerDesc = `<div class="trigger-desc">${signal.trigger}</div>`;
                 }
-                
+
+                // 详情弹窗
+                const detailsBtn = `<button class="order-details-btn" onclick='showOrderDetails(${JSON.stringify(o)})'>详情</button>`;
+
                 return `
                     <div class="order-log-item">
                         <div class="order-log-header">
@@ -1746,10 +1810,11 @@
                                 <span class="order-log-dir ${dir}">${dir.toUpperCase()} L${level}</span>
                                 <span style="margin-left: 8px;">${vol} 手</span>
                             </div>
-                            <div>
+                            <div style="display:flex; align-items:center; gap:8px;">
                                 <span class="order-log-pnl ${pnlClass}">
                                     ${itemPnl >= 0 ? '+' : ''}${itemPnl.toFixed(2)}
                                 </span>
+                                ${detailsBtn}
                             </div>
                         </div>
                         <div style="display: flex; justify-content: space-between; color: var(--text-secondary); font-size: 0.8rem;">
@@ -1763,10 +1828,91 @@
                             <div>做空价差: ${prices.spread_sell?.toFixed(2) || '--'}</div>
                             <div>做多价差: ${prices.spread_buy?.toFixed(2) || '--'}</div>
                         </div>
-                        </div>
                     </div>
                 `;
             }).join('');
+
+            // 详情弹窗函数 - 更清晰的 UI
+            window.showOrderDetails = function(order) {
+                const mt5 = order.mt5_result || {};
+                const okx = order.okx_result || {};
+                const statusText = (typeof order.status === 'boolean') ? (order.status ? '成功' : '失败') : (order.status || '--');
+                const statusClass = (typeof order.status === 'boolean') ? (order.status ? 'badge-success' : 'badge-fail') : (String(order.status).includes('skipped') ? 'badge-warn' : '');
+
+                const html = `
+                    <div class="order-modal-content">
+                        <div class="order-modal-header">
+                            <div>
+                                <strong>订单详情</strong>
+                                <div style="font-size:0.85rem;color:var(--text-secondary);">Task: ${order.task_id || '--'} · ID: ${order.order_id || '--'}</div>
+                            </div>
+                        </div>
+                        <div class="order-modal-tabs">
+                            <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+                                <div class="${statusClass}">${statusText}</div>
+                                <div style="font-size:0.85rem;color:var(--text-secondary);">${order.ts || '--'}</div>
+                            </div>
+                        </div>
+                        <div class="order-modal-body">
+                            <div class="order-row">
+                                <div class="order-section">
+                                    <h4>MT5 交易</h4>
+                                    <div class="order-kv"><div>Symbol</div><div class="v">${mt5.symbol || '--'}</div></div>
+                                    <div class="order-kv"><div>Side</div><div class="v">${mt5.side || '--'}</div></div>
+                                    <div class="order-kv"><div>Volume</div><div class="v">${mt5.volume ?? '--'}</div></div>
+                                    <div class="order-kv"><div>Filled</div><div class="v">${mt5.filled_volume ?? '--'}</div></div>
+                                    <div class="order-kv"><div>Avg Price</div><div class="v">${mt5.avg_price ?? '--'}</div></div>
+                                    <div class="order-kv"><div>Order ID</div><div class="v">${mt5.order_id || '--'}</div></div>
+                                    ${mt5.error ? `<div style="margin-top:8px;" class="badge-warn">错误: ${mt5.error}</div>` : ''}
+                                </div>
+                                <div class="order-section">
+                                    <h4>OKX 交易</h4>
+                                    <div class="order-kv"><div>Symbol</div><div class="v">${okx.symbol || '--'}</div></div>
+                                    <div class="order-kv"><div>Side</div><div class="v">${okx.side || '--'}</div></div>
+                                    <div class="order-kv"><div>Volume</div><div class="v">${okx.volume ?? '--'}</div></div>
+                                    <div class="order-kv"><div>Filled</div><div class="v">${okx.filled_volume ?? '--'}</div></div>
+                                    <div class="order-kv"><div>Avg Price</div><div class="v">${okx.avg_price ?? '--'}</div></div>
+                                    <div class="order-kv"><div>Order ID</div><div class="v">${okx.order_id || '--'}</div></div>
+                                    ${okx.error ? `<div style="margin-top:8px;" class="badge-warn">错误: ${okx.error}</div>` : ''}
+                                </div>
+                            </div>
+
+                            <div class="order-row">
+                                <div class="order-section">
+                                    <h4>信号 & 触发</h4>
+                                    <div class="order-kv"><div>Trigger</div><div class="v">${(order.signal && order.signal.trigger) || '--'}</div></div>
+                                    <div class="order-kv"><div>Action</div><div class="v">${(order.signal && order.signal.action) || '--'}</div></div>
+                                    <div class="order-kv"><div>Level</div><div class="v">${(order.signal && order.signal.level) || '--'}</div></div>
+                                    <div style="font-size:0.9rem;color:var(--text-secondary);margin-top:8px;">${(order.signal && order.signal.reason) ? ('原因: ' + order.signal.reason) : ''}</div>
+                                </div>
+                                <div class="order-section">
+                                    <h4>价格快照</h4>
+                                    <div class="order-kv"><div>MT5 Bid / Ask</div><div class="v">${order.prices?.mt5_bid ?? '--'} / ${order.prices?.mt5_ask ?? '--'}</div></div>
+                                    <div class="order-kv"><div>OKX Bid / Ask</div><div class="v">${order.prices?.okx_bid ?? '--'} / ${order.prices?.okx_ask ?? '--'}</div></div>
+                                    <div class="order-kv"><div>Spread Sell / Buy</div><div class="v">${order.prices?.spread_sell ?? '--'} / ${order.prices?.spread_buy ?? '--'}</div></div>
+                                </div>
+                            </div>
+
+                            <div class="order-section">
+                                <h4>Raw Details</h4>
+                                <div class="order-pre"><strong>MT5</strong>
+<pre>${JSON.stringify(mt5, null, 2)}</pre>
+                                </div>
+                                <div class="order-pre" style="margin-top:8px;"><strong>OKX</strong>
+<pre>${JSON.stringify(okx, null, 2)}</pre>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+
+                const modal = document.createElement('div');
+                modal.className = 'order-modal';
+                modal.innerHTML = html;
+                // click outside to close
+                modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
+                document.body.appendChild(modal);
+            };
         }
         
         // Refresh Order Logs button

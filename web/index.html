@@ -1607,9 +1607,13 @@
                 const mt5Pnl = o.mt5_pnl || 0;
                 const okxPnl = o.okx_pnl || 0;
                 const itemPnl = mt5Pnl + okxPnl;
-                
+                const symbolA = o.symbol_a || '';
+                const symbolB = o.symbol_b || '';
+                const exchangeA = o.exchange_a || '';
+                const exchangeB = o.exchange_b || '';
+
                 const pnlClass = itemPnl > 0 ? 'pnl-positive' : (itemPnl < 0 ? 'pnl-negative' : 'pnl-zero');
-                
+
                 let statusHtml = '';
                 if (status === 'filled_all') {
                     statusHtml = '<span style="color: var(--green);">✓ 成交</span>';
@@ -1620,7 +1624,7 @@
                 } else {
                     statusHtml = `<span>${status}</span>`;
                 }
-                
+
                 // 生成触发条件描述
                 let triggerDesc = '';
                 if (signal.trigger === 'manual' || signal.trigger === 'manual_reversal') {
@@ -1632,7 +1636,7 @@
                     const action = signal.action === 'short' ? '做空' : '做多';
                     const triggerLabel = isReversal ? `🔄 自动反转 → ${action}` : `⚡ 自动${action}`;
                     const reasonText = signal.reason || '';
-                    
+
                     triggerDesc = `
                         <div class="trigger-desc auto">
                             ${triggerLabel} L${level}
@@ -1641,9 +1645,18 @@
                 } else if (signal.trigger) {
                     triggerDesc = `<div class="trigger-desc">${signal.trigger}</div>`;
                 }
-                
+
+                // 新增：显示品种和交易所
+                let symbolInfo = '';
+                if (symbolA || symbolB || exchangeA || exchangeB) {
+                    symbolInfo = `<div class="order-symbol-info" style="color: var(--text-secondary); font-size: 0.8rem; margin-bottom: 2px;">
+                        <span>品种A: ${symbolA} (${exchangeA})</span> &nbsp; <span>品种B: ${symbolB} (${exchangeB})</span>
+                    </div>`;
+                }
+
                 return `
                     <div class="order-log-item">
+                        ${symbolInfo}
                         <div class="order-log-header">
                             <div>
                                 <span class="order-log-dir ${dir}">${dir.toUpperCase()} L${level}</span>

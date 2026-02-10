@@ -61,25 +61,16 @@ def format_duration(seconds: float) -> str:
 
 def is_market_open(
     now: Optional[datetime] = None,
-    open_hour: int = 22,
-    close_hour: int = 21,
-    close_weekday: int = 4,  # Friday
-    open_weekday: int = 6,   # Sunday
 ) -> bool:
     """
     Check if forex market is open.
     
-    Default hours for XAUUSD:
-    - Opens: Sunday 22:00 UTC
-    - Closes: Friday 21:00 UTC
-    - Daily break: 21:00-22:00 UTC
+    IC Markets XAUUSD trading hours:
+    - Daily maintenance: Beijing 05:55 - 07:01 = UTC 21:55 - 23:01
+    - Weekend: Friday UTC 22:00 close, Monday UTC 23:01 open
     
     Args:
         now: Current time (default: UTC now)
-        open_hour: Hour when market opens daily
-        close_hour: Hour when market closes daily
-        close_weekday: Weekday when market closes for weekend
-        open_weekday: Weekday when market opens after weekend
     
     Returns:
         True if market is open
@@ -87,25 +78,30 @@ def is_market_open(
     if now is None:
         now = utc_now()
     
-    weekday = now.weekday()
+    weekday = now.weekday()  # Mon=0, Sun=6
     hour = now.hour
+    minute = now.minute
     
-    # Saturday - always closed
+    # Daily maintenance window: UTC 21:55 - 23:01 (Beijing 05:55 - 07:01)
+    if hour == 21 and minute >= 55:
+        return False
+    if hour == 22:
+        return False
+    if hour == 23 and minute < 1:
+        return False
+    
+    # Saturday: Closed all day
     if weekday == 5:
         return False
-    
-    # Sunday - opens at open_hour
-    if weekday == open_weekday:
-        return hour >= open_hour
-    
-    # Friday - closes at close_hour
-    if weekday == close_weekday:
-        return hour < close_hour
-    
-    # Mon-Thu: closed during daily break
-    if hour == close_hour:
+        
+    # Sunday: Closed before 23:01 UTC (Beijing Monday 07:01)
+    if weekday == 6:
         return False
     
+    # Friday after 22:00 UTC: Closed for weekend
+    if weekday == 4 and hour >= 22:
+        return False
+        
     return True
 
 

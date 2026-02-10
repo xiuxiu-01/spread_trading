@@ -111,7 +111,11 @@ class MT5Gateway(BaseGateway):
                 self._initialized = False
         except Exception as e:
             logger.warning(f"Error during MT5 shutdown: {e}")
-        
+        # Shutdown thread pool to avoid leaving worker threads running
+        try:
+            self._executor.shutdown(wait=False)
+        except Exception:
+            pass
         self._set_status(GatewayStatus.DISCONNECTED)
         logger.info("MT5 disconnected")
     
@@ -422,29 +426,33 @@ class MT5Gateway(BaseGateway):
         """
         Check if market is currently open.
         
-        XAUUSD trading hours (approximate):
-        - Opens: Sunday 22:00 UTC
-        - Closes: Friday 21:00 UTC
-        - Daily break: 21:00-22:00 UTC
+        IC Markets XAUUSD trading hours:
+        - Daily maintenance: Beijing 05:55 - 07:01 = UTC 21:55 - 23:01
+        - Weekend: Friday UTC 22:00 close, Monday UTC 23:01 open (Sunday closes before 23:01)
         """
         now = datetime.now(timezone.utc)
-        weekday = now.weekday()
+        weekday = now.weekday()  # Mon=0, Sun=6
         hour = now.hour
+        minute = now.minute
         
-        # Saturday - closed
+        # Daily maintenance window: UTC 21:55 - 23:01 (Beijing 05:55 - 07:01)
+        if hour == 21 and minute >= 55:
+            return False
+        if hour == 22:
+            return False
+        if hour == 23 and minute < 1:
+            return False
+        
+        # Saturday: Closed all day
         if weekday == 5:
             return False
-        
-        # Sunday - opens at 22:00 UTC
+            
+        # Sunday: Closed before 23:01 UTC (Beijing Monday 07:01)
         if weekday == 6:
-            return hour >= 22
-        
-        # Friday - closes at 21:00 UTC
-        if weekday == 4:
-            return hour < 21
-        
-        # Mon-Thu: closed 21:00-22:00 for daily break
-        if hour == 21:
             return False
         
+        # Friday after 22:00 UTC: Closed for weekend
+        if weekday == 4 and hour >= 22:
+            return False
+            
         return True
