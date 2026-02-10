@@ -184,13 +184,27 @@ class MT5Gateway(BaseGateway):
             }
             mt5_tf = tf_map.get(timeframe, mt5.TIMEFRAME_M1)
             
-            rates = await self._run_sync(
-                mt5.copy_rates_from_pos,
-                self.symbol,
-                mt5_tf,
-                0,
-                limit
-            )
+            if start_time and end_time:
+                # Use range fetching if explicit times provided
+                utc_from = datetime.fromtimestamp(start_time, timezone.utc)
+                utc_to = datetime.fromtimestamp(end_time, timezone.utc)
+                
+                rates = await self._run_sync(
+                    mt5.copy_rates_range,
+                    self.symbol,
+                    mt5_tf,
+                    utc_from,
+                    utc_to
+                )
+            else:
+                # Fallback to fetching N bars from current position
+                rates = await self._run_sync(
+                    mt5.copy_rates_from_pos,
+                    self.symbol,
+                    mt5_tf,
+                    0,
+                    limit
+                )
             
             if rates is None or len(rates) == 0:
                 return []
