@@ -16,6 +16,15 @@ from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
 
 import aiohttp
+import ssl
+
+# Prefer certifi CA bundle for reliable certificate verification on Windows
+try:
+    import certifi
+    _CA_BUNDLE = certifi.where()
+except Exception:
+    certifi = None
+    _CA_BUNDLE = None
 
 from .base import BaseGateway, GatewayStatus
 from ..models import Tick, Order, OrderSide, OrderStatus, Position, PositionSide
@@ -161,7 +170,17 @@ class CCXTGateway(BaseGateway):
                 config['proxies'] = proxies
         
         # Create aiohttp session with ThreadedResolver to avoid aiodns DNS issues on Windows
-        connector = aiohttp.TCPConnector(resolver=aiohttp.resolver.ThreadedResolver())
+        # Use certifi CA bundle when available to avoid certificate verification errors
+        ssl_context = None
+        try:
+            if _CA_BUNDLE:
+                ssl_context = ssl.create_default_context(cafile=_CA_BUNDLE)
+            else:
+                ssl_context = ssl.create_default_context()
+        except Exception:
+            ssl_context = None
+
+        connector = aiohttp.TCPConnector(resolver=aiohttp.resolver.ThreadedResolver(), ssl=ssl_context)
         self._session = aiohttp.ClientSession(connector=connector)
         config['session'] = self._session
         
@@ -342,13 +361,106 @@ class CCXTGateway(BaseGateway):
                 # Requesting larger batches than exchange limit will just return limit.
                 # We request up to 1000, assuming CCXT/Exchange truncates as needed.
                 batch_limit = min(remaining, 1000) 
-                
-                batch = await self._exchange.fetch_ohlcv(
-                    self.symbol,
-                    timeframe=timeframe,
-                    limit=batch_limit,
-                    since=current_since
-                )
+                # Prepare params: some exchanges (e.g., Bitget) require explicit
+                # startTime/endTime parameters instead of CCXT's `since` alone.
+                params = {}
+                if current_since:
+                    params['startTime'] = int(current_since)
+                if end_ts_ms:
+                    params['endTime'] = int(end_ts_ms)
+
+                # If params were set, pass them through; otherwise use `since`.
+                if params:
+                    try:
+                        batch = await self._exchange.fetch_ohlcv(
+                            self.symbol,
+                            timeframe=timeframe,
+                            limit=batch_limit,
+                            params=params
+                        )
+                    except Exception as e:
+                        # Bitget occasionally rejects millisecond startTime/endTime with
+                        # Parameter verification failed (40017). Try multiple fallbacks:
+                        # 1) seconds instead of ms
+                        # 2) stringified numeric values
+                        # 3) fallback to CCXT's since/current_since without params
+                        err = str(e)
+                        last_exc = e
+                        if 'bitget' in err.lower() or ('40017' in err) or ('starttime' in err.lower()):
+                            # prepare alternative param variants
+                            attempts = []
+                            try:
+                                params_sec = params.copy()
+                                if 'startTime' in params_sec:
+                                    params_sec['startTime'] = int(params_sec['startTime'] // 1000)
+                                if 'endTime' in params_sec:
+                                    params_sec['endTime'] = int(params_sec['endTime'] // 1000)
+                                attempts.append(params_sec)
+                            except Exception:
+                                pass
+
+                            try:
+                                params_str = {k: str(v) for k, v in params.items()}
+                                attempts.append(params_str)
+                            except Exception:
+                                pass
+
+                            # also try variants that limit the endTime to a single batch window
+                            try:
+                                # limit window to one batch (batch_limit * timeframe)
+                                window_params = params.copy()
+                                if 'startTime' in window_params:
+                                    window_params['endTime'] = int(window_params['startTime'] + (batch_limit * tf_ms))
+                                attempts.append(window_params)
+                            except Exception:
+                                pass
+
+                            # try params with only startTime (no endTime)
+                            try:
+                                only_start = {k: v for k, v in params.items() if k.lower().startswith('start')}
+                                if only_start:
+                                    attempts.append(only_start)
+                            except Exception:
+                                pass
+
+                            # finally, try without params (use since)
+                            attempts.append(None)
+
+                            batch = None
+                            for alt in attempts:
+                                try:
+                                    if alt is None:
+                                        batch = await self._exchange.fetch_ohlcv(
+                                            self.symbol,
+                                            timeframe=timeframe,
+                                            limit=batch_limit,
+                                            since=current_since
+                                        )
+                                    else:
+                                        batch = await self._exchange.fetch_ohlcv(
+                                            self.symbol,
+                                            timeframe=timeframe,
+                                            limit=batch_limit,
+                                            params=alt
+                                        )
+                                    # success
+                                    break
+                                except Exception as e2:
+                                    last_exc = e2
+                                    continue
+
+                            if batch is None:
+                                # All fallbacks failed; raise the last exception for outer handler
+                                raise last_exc
+                        else:
+                            raise
+                else:
+                    batch = await self._exchange.fetch_ohlcv(
+                        self.symbol,
+                        timeframe=timeframe,
+                        limit=batch_limit,
+                        since=current_since
+                    )
                 
                 if not batch:
                     break

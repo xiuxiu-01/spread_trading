@@ -642,6 +642,10 @@
                         <label class="form-label">WebSocket Server</label>
                         <input type="text" class="form-input" id="settingWsServer" value="ws://localhost:8766/ws" readonly>
                     </div>
+                    <div class="form-group">
+                        <label class="form-label">Smoothing window (seconds) — used to average live ticks to prevent jitter</label>
+                        <input type="number" class="form-input" id="settingSmoothingSeconds" value="5" min="0" step="1">
+                    </div>
                     <button class="btn btn-primary" onclick="saveSettings()">Save Settings</button>
                 </div>
             </div>
@@ -664,13 +668,23 @@
                 
                 <!-- Step 1: Select Symbol -->
                 <div class="form-group">
-                    <label class="form-label">Select Symbol</label>
-                    <select class="form-select" id="modalSymbol" onchange="onSymbolChange()">
+                    <label class="form-label">Select Symbol (recommended list — you may type your own code)</label>
+                    <input list="symbolOptions" class="form-input" id="modalSymbol" onchange="onSymbolChange()" oninput="onSymbolChange()">
+                    <datalist id="symbolOptions">
                         <option value="XAUUSD">🥇 Gold (XAU/USD)</option>
                         <option value="XAGUSD">🥈 Silver (XAG/USD)</option>
                         <option value="BTCUSD">₿ Bitcoin (BTC/USD)</option>
                         <option value="ETHUSD">Ξ Ethereum (ETH/USD)</option>
-                    </select>
+                    </datalist>
+                </div>
+
+                <div class="form-group" id="customSymbolGroup">
+                    <label class="form-label">Per-exchange symbol codes (fill each exchange if needed)</label>
+                    <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
+                        <input type="text" class="form-input" id="modalCustomSymA" placeholder="Symbol for Exchange A (exchange-specific override)">
+                        <input type="text" class="form-input" id="modalCustomSymB" placeholder="Symbol for Exchange B (exchange-specific override)">
+                    </div>
+                    <small style="color:var(--text-secondary);">Leave blank to use the recommended mapping for the selected exchange.</small>
                 </div>
                 
                 <!-- Step 2: Select Exchanges -->
@@ -726,6 +740,14 @@
                     </div>
                 </div>
                 
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label">Smoothing Window (seconds)</label>
+                        <input type="number" class="form-input" id="modalSmoothingSeconds" value="5" min="0" max="60" step="1">
+                        <small style="color:var(--text-secondary);">Rolling average window for live spread to prevent jitter (0 = disabled)</small>
+                    </div>
+                </div>
+                
                 <div class="form-group">
                     <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
                         <input type="checkbox" id="modalDryRun" checked style="width: 18px; height: 18px;">
@@ -764,7 +786,7 @@
                     binance: "XAU/USDT:USDT",  // ✅ Binance swap ~4914
                     bybit: "PAXG/USDT:USDT",   // ✅ Bybit PAXG ~4915
                     gate: "XAU/USDT:USDT",     // ✅ Gate swap ~4918
-                    bitget: "XAU/USDT:USDT",   // ✅ Bitget swap ~4916
+                    bitget: "XAUT/USDT:USDT",   // ✅ Bitget swap ~4916
                     bitmart: "XAU/USDT:USDT"   // ✅ BitMart swap ~4917
                     // LBank ❌ K线数据不可用
                 },
@@ -840,6 +862,10 @@
         let selectedExchangeA = 'mt5';
         let selectedExchangeB = 'okx';
         let currentDetailTaskId = null;
+        // Smoothing window (seconds) for live ticks; default 5s (configurable in settings)
+        let smoothingSeconds = parseInt(localStorage.getItem('smoothingSeconds')) || 5;
+        // Buffers of recent ticks per task_id for averaging
+        const tickBuffers = {}; // { task_id: [ {ts: Date.now(), spread_buy, spread_sell, ema} ] }
 
         // =================================================================
         // WebSocket
@@ -912,6 +938,28 @@
             } else if (msg.type === 'error') {
                 alert(`Error: ${msg.payload?.message || msg.message}`);
             }
+        }
+
+        // helper: push tick into buffer and compute averaged values over smoothingSeconds
+        function pushAndAverageTick(tick) {
+            if (!tick || !tick.task_id) return null;
+            const id = tick.task_id;
+            if (!tickBuffers[id]) tickBuffers[id] = [];
+            const now = Date.now();
+            tickBuffers[id].push({ ts: now, spread_buy: tick.spread_buy || 0, spread_sell: tick.spread_sell || 0, ema: tick.ema || 0 });
+            // keep last 60s max (safety)
+            const cutoff = now - Math.max(1000, (smoothingSeconds * 1000));
+            tickBuffers[id] = tickBuffers[id].filter(x => x.ts >= cutoff);
+            // compute average over buffer
+            const buf = tickBuffers[id];
+            if (!buf.length) return null;
+            const sum = buf.reduce((acc, v) => {
+                acc.spread_buy += v.spread_buy;
+                acc.spread_sell += v.spread_sell;
+                acc.ema += v.ema;
+                return acc;
+            }, { spread_buy: 0, spread_sell: 0, ema: 0 });
+            return { spread_buy: sum.spread_buy / buf.length, spread_sell: sum.spread_sell / buf.length, ema: sum.ema / buf.length };
         }
 
         // =================================================================
@@ -1156,16 +1204,20 @@
         }
         
         function updateLiveTick(tick) {
+            // Use smoothing buffer to prevent jitter (configurable smoothingSeconds)
+            if (!tick || !tick.task_id) return;
+            const avg = pushAndAverageTick(tick);
+            if (!avg) return;
             // Update live data in task detail view if viewing current task
             if (tick.task_id && tick.task_id === currentDetailTaskId) {
                 if (document.getElementById('live_spread_sell')) {
-                    document.getElementById('live_spread_sell').textContent = (tick.spread_sell || 0).toFixed(2);
+                    document.getElementById('live_spread_sell').textContent = (avg.spread_sell || 0).toFixed(2);
                 }
                 if (document.getElementById('live_spread_buy')) {
-                    document.getElementById('live_spread_buy').textContent = (tick.spread_buy || 0).toFixed(2);
+                    document.getElementById('live_spread_buy').textContent = (avg.spread_buy || 0).toFixed(2);
                 }
                 if (document.getElementById('live_ema')) {
-                    document.getElementById('live_ema').textContent = (tick.ema || 0).toFixed(2);
+                    document.getElementById('live_ema').textContent = (avg.ema || 0).toFixed(2);
                 }
             }
         }
@@ -1211,14 +1263,30 @@
         function onSymbolChange() {
             const symbolCode = document.getElementById('modalSymbol').value;
             const symbol = SYMBOLS[symbolCode];
-            if (!symbol) return;
-            
+
+            // If symbol is not in recommended list, show custom inputs and allow selecting exchanges from all known exchanges
+            if (!symbol) {
+                document.getElementById('customSymbolGroup').style.display = 'block';
+                // set defaults for custom symbol
+                if (!document.getElementById('modalCustomSymA').value) document.getElementById('modalCustomSymA').value = symbolCode || '';
+                if (!document.getElementById('modalCustomSymB').value) document.getElementById('modalCustomSymB').value = symbolCode || '';
+                const supportedExchanges = Object.keys(EXCHANGES);
+                if (!supportedExchanges.includes(selectedExchangeA)) selectedExchangeA = supportedExchanges[0];
+                if (!supportedExchanges.includes(selectedExchangeB) || selectedExchangeB === selectedExchangeA) selectedExchangeB = supportedExchanges.find(e => e !== selectedExchangeA) || supportedExchanges[0];
+                renderExchangeSelector('exchangeASelector', null, 'A');
+                renderExchangeSelector('exchangeBSelector', null, 'B');
+                return;
+            }
+
+            // Prefill per-exchange symbol inputs for recommended symbol (UI now always shows them)
+            if (document.getElementById('modalCustomSymA')) document.getElementById('modalCustomSymA').value = symbol.exchanges[selectedExchangeA] || '';
+            if (document.getElementById('modalCustomSymB')) document.getElementById('modalCustomSymB').value = symbol.exchanges[selectedExchangeB] || '';
             // Update default params
             document.getElementById('modalFirstSpread').value = symbol.defaultParams.firstSpread;
             document.getElementById('modalNextSpread').value = symbol.defaultParams.nextSpread;
             document.getElementById('modalTakeProfit').value = symbol.defaultParams.takeProfit;
             document.getElementById('modalTradeVol').value = symbol.defaultParams.lotSize;
-            
+
             // Ensure selected exchanges are valid for this symbol
             const supportedExchanges = Object.keys(symbol.exchanges);
             if (!supportedExchanges.includes(selectedExchangeA)) {
@@ -1227,7 +1295,7 @@
             if (!supportedExchanges.includes(selectedExchangeB) || selectedExchangeB === selectedExchangeA) {
                 selectedExchangeB = supportedExchanges.find(e => e !== selectedExchangeA) || supportedExchanges[1];
             }
-            
+
             // Render exchange selectors
             renderExchangeSelector('exchangeASelector', symbol, 'A');
             renderExchangeSelector('exchangeBSelector', symbol, 'B');
@@ -1235,12 +1303,12 @@
         
         function renderExchangeSelector(containerId, symbol, side) {
             const container = document.getElementById(containerId);
-            const supportedExchanges = Object.keys(symbol.exchanges);
+            const supportedExchanges = symbol ? Object.keys(symbol.exchanges) : Object.keys(EXCHANGES);
             
             container.innerHTML = supportedExchanges.map(exId => {
                 const ex = EXCHANGES[exId];
                 if (!ex) return '';
-                const symbolOnEx = symbol.exchanges[exId];
+                const symbolOnEx = symbol ? (symbol.exchanges[exId] || '') : '';
                 const isSelected = exId === (side === 'A' ? selectedExchangeA : selectedExchangeB);
                 
                 return `
@@ -1292,14 +1360,18 @@
             
             const taskId = `${selectedExchangeA}-${selectedExchangeB}-${symbolCode.toLowerCase()}-${Date.now().toString(36)}`;
             
+            // determine symbol_a / symbol_b: prefer custom inputs when provided
+            const customA = (document.getElementById('modalCustomSymA') && document.getElementById('modalCustomSymA').value.trim()) || null;
+            const customB = (document.getElementById('modalCustomSymB') && document.getElementById('modalCustomSymB').value.trim()) || null;
+
             const payload = {
                 task_id: taskId,
                 name: taskName || `${selectedExchangeA}-${selectedExchangeB}`,
                 exchange_a: selectedExchangeA,
                 exchange_b: selectedExchangeB,
                 symbol: symbolCode,
-                symbol_a: symbol.exchanges[selectedExchangeA],
-                symbol_b: symbol.exchanges[selectedExchangeB],
+                symbol_a: customA || (symbol ? symbol.exchanges[selectedExchangeA] : symbolCode),
+                symbol_b: customB || (symbol ? symbol.exchanges[selectedExchangeB] : symbolCode),
                 config: {
                     emaPeriod: parseInt(document.getElementById('modalEmaPeriod').value) || 20,
                     firstSpread: parseFloat(document.getElementById('modalFirstSpread').value),
@@ -1307,6 +1379,7 @@
                     takeProfit: parseFloat(document.getElementById('modalTakeProfit').value),
                     maxPos: parseInt(document.getElementById('modalMaxPos').value) || 3,
                     tradeVolume: parseFloat(document.getElementById('modalTradeVol').value) || 0.01,
+                    smoothingSeconds: parseInt(document.getElementById('modalSmoothingSeconds').value) || 5,
                     dryRun: document.getElementById('modalDryRun').checked
                 },
                 autoStart: document.getElementById('modalAutoStart').checked
@@ -1433,11 +1506,17 @@
                 dryRun: document.getElementById('settingDryRun').value === 'true',
                 defaultVolume: parseFloat(document.getElementById('settingDefaultVolume').value)
             };
-            
+            // read smoothing seconds and persist to localStorage
+            const s = parseInt(document.getElementById('settingSmoothingSeconds').value) || 0;
+            smoothingSeconds = s;
+            localStorage.setItem('smoothingSeconds', String(s));
+
+            // include smoothingSeconds in settings payload to inform server if supported
+            settings.smoothingSeconds = s;
             if (ws && ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({ type: 'update_settings', payload: settings }));
             }
-            
+
             alert('Settings saved');
         }
 
@@ -1471,6 +1550,16 @@
         // =================================================================
         // Initialize
         // =================================================================
+        // apply persisted smoothing setting to UI
+        document.addEventListener('DOMContentLoaded', () => {
+            const el = document.getElementById('settingSmoothingSeconds');
+            if (el) el.value = smoothingSeconds;
+            // set default modalSymbol input to first recommended symbol
+            const ms = document.getElementById('modalSymbol');
+            if (ms && !ms.value) ms.value = 'XAUUSD';
+            onSymbolChange();
+        });
+
         connect();
         setInterval(refreshDashboard, 10000);
     </script>

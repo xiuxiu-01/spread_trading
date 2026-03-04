@@ -386,8 +386,8 @@ class ArbitrageManager:
         use_ws_a = hasattr(gw_a, 'subscribe_ticker')
         use_ws_b = hasattr(gw_b, 'subscribe_ticker')
         
-        if use_ws_b and hasattr(gw_b, '_ws_task'):
-            # Start WebSocket subscription for OKX/CCXT gateway
+        if use_ws_b and (not getattr(gw_b, '_ws_task', None) or getattr(gw_b, '_ws_task').done()):
+            # Start WebSocket subscription for OKX/CCXT gateway if not already running
             await gw_b.subscribe_ticker()
             logger.info(f"{task_id}: Started WebSocket subscription for {task.exchange_b}")
             # Wait a moment for first tick
@@ -400,13 +400,58 @@ class ArbitrageManager:
                 # For CCXT/OKX: prefer cached WebSocket tick to avoid rate limits
                 tick_a = await gw_a.get_ticker()
                 
-                # For gateway B (OKX), use cached last_tick from WebSocket if available
-                if use_ws_b and gw_b.last_tick:
+                # For gateway B (OKX), prefer cached WebSocket tick to avoid rate limits
+                tick_b = None
+                if use_ws_b:
                     tick_b = gw_b.last_tick
+
+                    # Ensure the WS tick is recent enough before using it for trading
+                    ws_max_age = float(task.config.get("wsTickMaxAgeSec", 5.0))
+                    fresh = False
+                    if tick_b and hasattr(tick_b, 'timestamp') and tick_b.timestamp:
+                        try:
+                            age = (datetime.now(timezone.utc) - tick_b.timestamp).total_seconds()
+                            fresh = age <= ws_max_age
+                        except Exception:
+                            fresh = True
+                    else:
+                        fresh = False
+
+                    if not fresh:
+                        logger.warning(f"{task_id}: CCXT WS tick missing or stale (age>{ws_max_age}s). Skipping this iteration and attempting to restart subscription.")
+                        # Try to (re)start subscription if the ws task has finished
+                        try:
+                            if hasattr(gw_b, '_ws_task') and getattr(gw_b, '_ws_task') and getattr(gw_b, '_ws_task').done():
+                                await gw_b.subscribe_ticker()
+                                logger.info(f"{task_id}: Restarted WebSocket subscription for {task.exchange_b}")
+                        except Exception as e:
+                            logger.warning(f"{task_id}: Failed to restart WS subscription: {e}")
+
+                        # Do NOT fallback to REST. Skip processing until WS provides fresh ticks.
+                        await asyncio.sleep(1)
+                        continue
                 else:
                     tick_b = await gw_b.get_ticker()
                 
                 if tick_a and tick_b:
+                    # Ensure ticks are time-synchronized before processing/trading
+                    try:
+                        t_a = getattr(tick_a, 'timestamp', None)
+                        t_b = getattr(tick_b, 'timestamp', None)
+                        time_diff = None
+                        if t_a and t_b:
+                            time_diff = abs((t_a - t_b).total_seconds())
+                        else:
+                            time_diff = None
+                    except Exception:
+                        time_diff = None
+
+                    max_sync = float(task.config.get('tickSyncMaxSec', 0.5))
+                    if time_diff is None or time_diff > max_sync:
+                        logger.warning(f"{task_id}: Tick timestamps out of sync (diff={time_diff}). Required <={max_sync}s — skipping processing to avoid unsafe trades.")
+                        # Skip this iteration; wait a short while to avoid tight loop
+                        await asyncio.sleep(0.2)
+                        continue
                     # Calculate spreads
                     spread_sell = tick_a.bid - tick_b.ask
                     spread_buy = tick_a.ask - tick_b.bid
@@ -416,7 +461,12 @@ class ArbitrageManager:
                     agg = self.aggregators.get(task_id)
                     if agg:
                         agg.add_tick_spread(spread_sell, spread_buy, spread_mid)
-                        avg_sell, avg_buy, avg_mid = agg.get_rolling_average()
+                        # Use per-task smoothing window if set, fallback to aggregator default (5s)
+                        try:
+                            window = float(task.config.get('smoothingSeconds', 5.0))
+                        except Exception:
+                            window = 5.0
+                        avg_sell, avg_buy, avg_mid = agg.get_rolling_average(window_seconds=window)
                         
                         # Update task
                         task.update_tick(
@@ -430,6 +480,13 @@ class ArbitrageManager:
                         # Emit tick
                         if self._on_tick:
                             await self._on_tick(task_id, {
+                                "exchange_a": task.exchange_a,
+                                "exchange_b": task.exchange_b,
+                                "exa_bid": tick_a.bid,
+                                "exa_ask": tick_a.ask,
+                                "exb_bid": tick_b.bid,
+                                "exb_ask": tick_b.ask,
+                                # keep legacy keys for backward compat
                                 "mt5_bid": tick_a.bid,
                                 "mt5_ask": tick_a.ask,
                                 "okx_bid": tick_b.bid,
@@ -439,10 +496,13 @@ class ArbitrageManager:
                                 "avg_spread_sell": avg_sell,
                                 "avg_spread_buy": avg_buy,
                                 "ema": agg.last_ema,
+                                "smoothingSeconds": window,
                                 "time": datetime.now().timestamp(),
                                 "bar_time": int(datetime.now().timestamp() // 60) * 60,
                                 "mt5_symbol": getattr(tick_a, 'symbol', ''),
-                                "okx_symbol": getattr(tick_b, 'symbol', '')
+                                "okx_symbol": getattr(tick_b, 'symbol', ''),
+                                "exa_symbol": getattr(tick_a, 'symbol', ''),
+                                "exb_symbol": getattr(tick_b, 'symbol', '')
                             })
                         
                         # Check signals (if auto trade enabled)
@@ -450,7 +510,30 @@ class ArbitrageManager:
                         if task.config.get("autoTrade", False):
                             await self._check_signals(task_id, avg_sell, avg_buy)
                 
-                await asyncio.sleep(0.1)  # 100ms tick rate
+                # Adaptive sleep to save CPU during off-hours
+                sleep_interval = 0.1
+                try:
+                    market_open_a = True
+                    market_open_b = True
+                    if hasattr(gw_a, 'is_market_open'):
+                        if asyncio.iscoroutinefunction(gw_a.is_market_open):
+                            market_open_a = await gw_a.is_market_open()
+                        else:
+                            market_open_a = gw_a.is_market_open()
+                    if hasattr(gw_b, 'is_market_open'):
+                        if asyncio.iscoroutinefunction(gw_b.is_market_open):
+                            market_open_b = await gw_b.is_market_open()
+                        else:
+                            market_open_b = gw_b.is_market_open()
+                except Exception:
+                    market_open_a = market_open_a if 'market_open_a' in locals() else True
+                    market_open_b = market_open_b if 'market_open_b' in locals() else True
+
+                if not market_open_a and not market_open_b:
+                    # Both markets closed — back off
+                    sleep_interval = 10.0
+
+                await asyncio.sleep(sleep_interval)
                 
             except asyncio.CancelledError:
                 break
@@ -600,7 +683,11 @@ class ArbitrageManager:
                 logger.debug(f"{task_id}: No exact OKX match for MT5 ts={ts_a}, using OKX ts={ts_b}")
             
             # Get current tick for spread calculation (or use rolling average)
-            avg_sell, avg_buy, _ = agg.get_rolling_average()
+            try:
+                window = float(task.config.get('smoothingSeconds', 5.0))
+            except Exception:
+                window = 5.0
+            avg_sell, avg_buy, _ = agg.get_rolling_average(window_seconds=window)
             
             # Use MT5 bar timestamp for consistency
             ts_val = ts_a or int(datetime.now().timestamp())

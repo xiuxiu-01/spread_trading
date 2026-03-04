@@ -12,6 +12,7 @@
             --text-primary: #c9d1d9;
             --text-secondary: #8b949e;
             --accent: #58a6ff;
+            --yellow: #d29922;
             --border: #30363d;
             --green: #238636;
             --red: #da3633;
@@ -398,6 +399,72 @@
             background: rgba(218, 54, 51, 0.3);
             color: var(--red);
         }
+
+        .order-details-btn {
+            background: transparent;
+            border: 1px solid var(--border);
+            color: var(--text);
+            padding: 4px 8px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.8rem;
+        }
+        .order-details-btn:hover { opacity: 0.95; }
+
+        /* Modal styles */
+        .order-modal {
+            position: fixed;
+            left: 0;
+            top: 0;
+            width: 100vw;
+            height: 100vh;
+            background: rgba(0,0,0,0.5);
+            z-index: 9999;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+            overflow-y: auto;
+            overflow-x: hidden; /* hide horizontal scroll; content will wrap instead */
+        }
+        .order-modal-content {
+            background: #0f1720;
+            color: var(--text-primary);
+            border-radius: 8px;
+            /* Make content fit within viewport and keep it narrower than page width */
+            width: min(92vw, 820px);
+            max-width: 820px;
+            max-height: 80vh;
+            overflow-y: auto;
+            overflow-x: hidden; /* prevent inner horizontal scroll; force wrapping */
+            box-shadow: 0 6px 30px rgba(0,0,0,0.6);
+            border: 1px solid var(--border);
+        }
+        /* Force single-column layout inside the order details modal so cards stack vertically */
+        .order-modal-content .order-row {
+            grid-template-columns: 1fr !important;
+        }
+        .order-modal-header {
+            display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-bottom:1px solid var(--border);
+        }
+        .order-modal-tabs { padding: 8px 16px; border-bottom: 1px solid var(--border); display:flex; gap:12px; align-items:center; }
+        .order-modal-body { padding: 12px 16px; display: grid; gap: 12px; }
+        .order-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+        .order-section { background: var(--card-bg); padding: 10px; border-radius:6px; border:1px solid var(--border); }
+        .order-section h4 { margin:0 0 8px 0; font-size:0.95rem; color:var(--text-primary); }
+        .order-kv { display:flex; justify-content:space-between; padding:4px 0; color:var(--text-secondary); font-size:0.9rem; }
+        .order-kv .v { color: var(--text-primary); }
+        .order-pre { background: #071019; padding:8px; border-radius:4px; font-family: monospace; font-size:0.85rem; color:var(--text-secondary); max-height:220px; overflow:auto; }
+        .order-pre pre { white-space: pre-wrap; word-break: break-word; margin:0; }
+        .badge-success { color: var(--green); font-weight:600; }
+        .badge-fail { color: var(--red); font-weight:600; }
+        .badge-warn { color: var(--yellow); font-weight:600; }
+
+        /* Responsive: on narrow screens stack columns vertically to avoid horizontal scroll */
+        @media (max-width: 760px) {
+            .order-row { grid-template-columns: 1fr; }
+            .order-modal-content { max-width: 98%; margin: 6vh auto; }
+        }
         
         .order-log-prices {
             display: grid;
@@ -671,12 +738,12 @@
                 <h3>账户信息</h3>
                 <div class="account-grid">
                     <div class="account-card">
-                        <strong style="color: #4caf50;">MT5</strong>
+                        <strong style="color: #4caf50;" id="labelExA">Exchange A</strong>
                         净值: <span id="mt5-equity">--</span><br/>
                         <span>Net Lots:</span> <span id="mt5-net" style="font-weight: bold;">0.00</span>
                     </div>
                     <div class="account-card">
-                        <strong style="color: #ff9800;">OKX</strong>
+                        <strong style="color: #ff9800;" id="labelExB">Exchange B</strong>
                         USDT余额: <span id="okx-balance">--</span><br/>
                         <span>Eq Lots:</span> <span id="okx-net" style="font-weight: bold;">0.00</span>
                     </div>
@@ -694,7 +761,7 @@
                 <h3>实时行情 (Real-time Quotes)</h3>
                 <div class="quotes-grid">
                     <div class="quote-card">
-                        <strong style="color: #4caf50;">MT5</strong>
+                        <strong style="color: #4caf50;" id="quoteExALabel">Exchange A</strong>
                         <div class="quote-row">
                             <div>
                                 <div class="quote-label">买价</div>
@@ -707,7 +774,7 @@
                         </div>
                     </div>
                     <div class="quote-card">
-                        <strong style="color: #ff9800;">OKX</strong>
+                        <strong style="color: #ff9800;" id="quoteExBLabel">Exchange B</strong>
                         <div class="quote-row">
                             <div>
                                 <div class="quote-label">买价</div>
@@ -720,7 +787,7 @@
                         </div>
                     </div>
                     <div class="quote-card">
-                        <strong style="color: #58a6ff;">Spread (实时 / 5s均值)</strong>
+                        <strong style="color: #58a6ff;">Spread (实时 / <span id="smoothingLabel">5</span>s均值)</strong>
                         <div class="quote-row">
                             <div>
                                 <div class="quote-label">做空 Sell</div>
@@ -759,19 +826,19 @@
         <!-- Charts Tab -->
         <div id="tab-charts" class="tab-content">
             <div class="chart-container">
-                <h3 class="chart-title">K线图 (MT5 vs OKX)</h3>
+                <h3 class="chart-title">K线图 (<span id="chartExAName">Exchange A</span> vs <span id="chartExBName">Exchange B</span>)</h3>
                 <div id="priceChart" class="chart-div"></div>
                 <div id="priceLegend" class="chart-legend">
-                    <div style="color: #4caf50">MT5 <span id="mt5Val"></span></div>
-                    <div style="color: #ef5350">OKX <span id="okxVal"></span></div>
+                    <div style="color: #4caf50"><span id="legendExA">ExA</span> <span id="mt5Val"></span></div>
+                    <div style="color: #ef5350"><span id="legendExB">ExB</span> <span id="okxVal"></span></div>
                 </div>
             </div>
             <div class="chart-container">
-                <h3 class="chart-title">做空Spread (卖MT5买OKX)</h3>
+                <h3 class="chart-title">做空Spread (卖<span class="dynExA">ExA</span>买<span class="dynExB">ExB</span>)</h3>
                 <div id="spreadSellChart" class="chart-div"></div>
             </div>
             <div class="chart-container">
-                <h3 class="chart-title">做多Spread (买MT5卖OKX)</h3>
+                <h3 class="chart-title">做多Spread (买<span class="dynExA">ExA</span>卖<span class="dynExB">ExB</span>)</h3>
                 <div id="spreadBuyChart" class="chart-div"></div>
             </div>
             <button id="scrollToLatest" class="btn-blue" style="margin-top: 10px;">跳到最新</button>
@@ -807,8 +874,8 @@
 
             <div class="panel">
                 <h3>交易品种</h3>
-                <p style="margin: 5px 0; font-size: 0.85rem;">OKX: <span id="okxSymbol">-</span></p>
-                <p style="margin: 5px 0; font-size: 0.85rem;">MT5: <span id="mt5Symbol">-</span></p>
+                <p style="margin: 5px 0; font-size: 0.85rem;"><span id="tradingExBLabel">Exchange B</span>: <span id="okxSymbol">-</span></p>
+                <p style="margin: 5px 0; font-size: 0.85rem;"><span id="tradingExALabel">Exchange A</span>: <span id="mt5Symbol">-</span></p>
             </div>
         </div>
 
@@ -823,11 +890,11 @@
                 <!-- PnL Summary -->
                 <div id="pnlSummary" class="pnl-summary">
                     <div class="pnl-item">
-                        <span class="pnl-label">MT5 盈亏:</span>
+                        <span class="pnl-label"><span class="dynExA">ExA</span> 盈亏:</span>
                         <span id="pnlMt5" class="pnl-value">--</span>
                     </div>
                     <div class="pnl-item">
-                        <span class="pnl-label">OKX 盈亏:</span>
+                        <span class="pnl-label"><span class="dynExB">ExB</span> 盈亏:</span>
                         <span id="pnlOkx" class="pnl-value">--</span>
                     </div>
                     <div class="pnl-item">
@@ -990,6 +1057,8 @@
         const priceContainer = document.getElementById('priceChart');
         const priceChart = createChart(priceContainer, chartOptions);
         
+        let exASeriesTitle = 'ExA';
+        let exBSeriesTitle = 'ExB';
         const mt5Series = priceChart.addSeries(LightweightCharts.CandlestickSeries, {
             upColor: '#238636', 
             downColor: '#da3633', 
@@ -997,7 +1066,7 @@
             borderDownColor: '#da3633',
             wickUpColor: '#238636',
             wickDownColor: '#da3633',
-            title: 'MT5',
+            title: exASeriesTitle,
         });
         
         const okxSeries = priceChart.addSeries(LightweightCharts.CandlestickSeries, {
@@ -1007,7 +1076,7 @@
             borderDownColor: '#ef5350',
             wickUpColor: '#4caf50',
             wickDownColor: '#ef5350',
-            title: 'OKX',
+            title: exBSeriesTitle,
         });
         
         // Spread Sell Chart
@@ -1015,9 +1084,13 @@
         const spreadSellChart = createChart(spreadSellContainer, chartOptions);
         
         const spreadSellSeries = spreadSellChart.addSeries(LightweightCharts.LineSeries, {
-            color: '#ef5350',
+            color: '#ffeb3b',
             lineWidth: 2,
             title: '做空价差',
+            lastValueVisible: true,
+            priceLineVisible: true,
+            crosshairMarkerVisible: true,
+            lineStyle: LineStyle.Solid,
         });
         
         // Spread Buy Chart
@@ -1028,6 +1101,10 @@
             color: '#4caf50',
             lineWidth: 2,
             title: '做多价差',
+            lastValueVisible: true,
+            priceLineVisible: true,
+            crosshairMarkerVisible: true,
+            lineStyle: LineStyle.Solid,
         });
 
         // EMA Series for both charts
@@ -1149,11 +1226,11 @@
                 statusEl.className = 'status connected';
                 addLog('WebSocket 已连接', 'success');
                 
-                // Send initial requests
-                ws.send(JSON.stringify({ type: "get_history", task_id: currentTask }));
-                ws.send(JSON.stringify({ type: "get_account", payload: { task_id: currentTask } }));
-                ws.send(JSON.stringify({ type: "get_params", payload: { task_id: currentTask } }));
-                ws.send(JSON.stringify({ type: "get_order_logs", limit: 50 }));
+                // Get tasks list first
+                ws.send(JSON.stringify({ type: "get_tasks" }));
+                
+                // Also request data for current task (in case get_tasks fails or is slow)
+                requestTaskData(currentTask);
 
                 if (reconnectTimer) {
                     clearTimeout(reconnectTimer);
@@ -1190,6 +1267,26 @@
                 connect();
             }, 3000);
         }
+        
+        function requestTaskData(taskId) {
+            if (!taskId || !ws || ws.readyState !== WebSocket.OPEN) return;
+            // Clear old data first to avoid confusion
+            if (mt5Series) mt5Series.setData([]);
+            if (okxSeries) okxSeries.setData([]);
+            if (spreadSellSeries) spreadSellSeries.setData([]);
+            if (spreadBuySeries) spreadBuySeries.setData([]);
+            if (emaSellSeries) emaSellSeries.setData([]);
+            if (emaBuySeries) emaBuySeries.setData([]);
+            // Clear threshold series
+            sellThresholdSeries.forEach(s => s && s.setData([]));
+            buyThresholdSeries.forEach(s => s && s.setData([]));
+            globalSpreadData = [];
+            
+            ws.send(JSON.stringify({ type: "get_history", payload: { task_id: taskId } }));
+            ws.send(JSON.stringify({ type: "get_account", payload: { task_id: taskId } }));
+            ws.send(JSON.stringify({ type: "get_params", payload: { task_id: taskId } }));
+            ws.send(JSON.stringify({ type: "get_order_logs", payload: { limit: 50, task_id: taskId } }));
+        }
 
         const paramsForm = document.getElementById('paramsForm');
         let currentParams = {};
@@ -1198,26 +1295,44 @@
         let currentTask = 'mt5-okx-xau';
         const taskSelector = document.getElementById('taskSelector');
         
+        // Parse URL params for task override
+        const urlParams = new URLSearchParams(window.location.search);
+        const urlTask = urlParams.get('task');
+        
+        if (urlTask) {
+            currentTask = urlTask;
+            console.log("Using task from URL:", currentTask);
+            
+            // Check if option exists
+            let optionExists = false;
+            for (let i = 0; i < taskSelector.options.length; i++) {
+                if (taskSelector.options[i].value === currentTask) {
+                    taskSelector.selectedIndex = i;
+                    optionExists = true;
+                    break;
+                }
+            }
+            
+            // If not exists, add it
+            if (!optionExists) {
+                const opt = document.createElement('option');
+                opt.value = currentTask;
+                // Try to get symbol from URL or use task ID
+                const urlSymbol = urlParams.get('symbol') || urlTask;
+                const displayLabel = urlParams.get('symbol') 
+                    ? `${urlParams.get('symbol')} (${currentTask.substring(0, 8)}...)` 
+                    : currentTask;
+                    
+                opt.text = displayLabel;
+                opt.selected = true;
+                taskSelector.appendChild(opt); // appendChild is better for select
+            }
+        }
+
         taskSelector.addEventListener('change', (e) => {
             currentTask = e.target.value;
             addLog(`切换任务至: ${currentTask}`, 'info');
-            
-            // Clear charts
-            if (mt5Series) mt5Series.setData([]);
-            if (okxSeries) okxSeries.setData([]);
-            if (spreadSellSeries) spreadSellSeries.setData([]);
-            if (spreadBuySeries) spreadBuySeries.setData([]);
-            if (emaSellSeries) emaSellSeries.setData([]);
-            if (emaBuySeries) emaBuySeries.setData([]);
-            
-            // Reset state
-            globalSpreadData = [];
-            globalEmaData = [];
-            
-            // Refresh
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: "get_history", task_id: currentTask }));
-            }
+            requestTaskData(currentTask);
         });
 
         let markers = [];
@@ -1238,6 +1353,12 @@
 
             if (msg.type === 'params') {
                 updateParamsUI(msg.payload);
+            } else if (msg.type === 'params_updated') {
+                // Handle params update confirmation
+                if (msg.payload && msg.payload.config) {
+                    updateParamsUI(msg.payload.config);
+                    addLog('参数更新已生效', 'success');
+                }
             } else if (msg.type === 'account') {
                 // addLog('Received account update', 'info');
                 renderAccount(msg.payload);
@@ -1259,6 +1380,49 @@
                 handleTradeResult(msg.payload);
             } else if (msg.type === 'order_logs') {
                 renderOrderLogs(msg.payload);
+            } else if (msg.type === 'tasks') {
+                updateTaskSelector(msg.payload);
+            }
+        }
+        
+        function updateTaskSelector(tasks) {
+            if (!tasks || !Array.isArray(tasks)) return;
+            
+            const selector = document.getElementById('taskSelector');
+            // Remember current selection
+            const currentSelection = currentTask;
+            
+            selector.innerHTML = '';
+            
+            let foundCurrent = false;
+            
+            tasks.forEach(task => {
+                const opt = document.createElement('option');
+                opt.value = task.task_id;
+                // Display: SYMBOL (ExchangeA-ExchangeB)
+                // e.g. XAUUSD (MT5-OKX)
+                opt.text = `${task.symbol || task.symbol_a} (${task.exchange_a}-${task.exchange_b})`;
+                if (task.task_id === currentSelection) {
+                    opt.selected = true;
+                    foundCurrent = true;
+                }
+                selector.appendChild(opt);
+            });
+            
+            // If current selection is not in list (e.g. was default 'mt5-okx-xau' but actual is different), pick first
+            if (!foundCurrent && tasks.length > 0) {
+                // Check if we have a "better" match by symbol if ID changed?
+                // For now, just pick first
+                const first = tasks[0].task_id;
+                console.log(`Current task ${currentSelection} not found in list, switching to ${first}`);
+                currentTask = first;
+                // Reflect in UI
+                selector.value = first;
+                // Request data for new task
+                requestTaskData(currentTask);
+            } else if (foundCurrent) {
+                // Even if found, refresh data to be sure
+                 requestTaskData(currentTask);
             }
         }
         
@@ -1381,22 +1545,44 @@
         }
         
         function updateRealtimeQuotes(tick) {
-            // Debug: Check consistency
-            // console.log("Tick:", tick); 
-            
-            // Verify symbol if provided
-            if (tick.mt5_symbol) {
-               // Update Labels dynamically
-               const mt5Label = document.querySelector('.quote-card strong[style*="#4caf50"]');
-               if (mt5Label && !mt5Label.textContent.includes(tick.mt5_symbol)) {
-                   mt5Label.textContent = `MT5 (${tick.mt5_symbol})`;
-               }
+            // Update exchange labels dynamically from tick data
+            const exAName = (tick.exchange_a || 'ExA').toUpperCase();
+            const exBName = (tick.exchange_b || 'ExB').toUpperCase();
+            const exASymbol = tick.exa_symbol || tick.mt5_symbol || '';
+            const exBSymbol = tick.exb_symbol || tick.okx_symbol || '';
+
+            // Update all dynamic exchange name labels
+            const setText = (id, txt) => { const el = document.getElementById(id); if (el) el.textContent = txt; };
+            setText('labelExA', exASymbol ? `${exAName} (${exASymbol})` : exAName);
+            setText('labelExB', exBSymbol ? `${exBName} (${exBSymbol})` : exBName);
+            setText('quoteExALabel', exASymbol ? `${exAName} (${exASymbol})` : exAName);
+            setText('quoteExBLabel', exBSymbol ? `${exBName} (${exBSymbol})` : exBName);
+            setText('chartExAName', exAName);
+            setText('chartExBName', exBName);
+            setText('legendExA', exAName);
+            setText('legendExB', exBName);
+            setText('tradingExALabel', exAName);
+            setText('tradingExBLabel', exBName);
+            document.querySelectorAll('.dynExA').forEach(el => el.textContent = exAName);
+            document.querySelectorAll('.dynExB').forEach(el => el.textContent = exBName);
+
+            // Update chart series titles dynamically
+            if (exAName !== exASeriesTitle) {
+                exASeriesTitle = exAName;
+                try { mt5Series.applyOptions({ title: exAName }); } catch(e) {}
             }
-            if (tick.okx_symbol) {
-                const okxLabel = document.querySelector('.quote-card strong[style*="#ff9800"]');
-                if (okxLabel && !okxLabel.textContent.includes(tick.okx_symbol)) {
-                    okxLabel.textContent = `OKX (${tick.okx_symbol})`;
-                }
+            if (exBName !== exBSeriesTitle) {
+                exBSeriesTitle = exBName;
+                try { okxSeries.applyOptions({ title: exBName }); } catch(e) {}
+            }
+
+            // Store exchange names globally for order log rendering
+            window._exAName = exAName;
+            window._exBName = exBName;
+
+            // Update smoothing label from actual backend value
+            if (tick.smoothingSeconds !== undefined) {
+                setText('smoothingLabel', tick.smoothingSeconds);
             }
 
             if (tick.mt5_bid !== null) {
@@ -1420,7 +1606,7 @@
                 el.style.color = tick.spread_sell > ema ? '#ef5350' : '#4caf50';
             }
             
-            // Display 5s rolling average spread
+            // Display rolling average spread (window from backend smoothingSeconds)
             if (tick.avg_spread_sell !== undefined && tick.avg_spread_sell !== null) {
                 const el = document.getElementById('rt-avg-spread-sell');
                 el.textContent = '均:' + tick.avg_spread_sell.toFixed(2);
@@ -1433,7 +1619,7 @@
                 el.style.color = tick.spread_buy < ema ? '#ef5350' : '#4caf50';
             }
             
-            // Display 5s rolling average spread buy
+            // Display rolling average spread buy
             if (tick.avg_spread_buy !== undefined && tick.avg_spread_buy !== null) {
                 const el = document.getElementById('rt-avg-spread-buy');
                 el.textContent = '均:' + tick.avg_spread_buy.toFixed(2);
@@ -1449,22 +1635,39 @@
         function setupTradeButtons() {
             const longHandler = () => {
                 const vol = document.getElementById('tradeVol').value;
+                // Send tradeVolume first (optional, but good for persistence)
                 ws.send(JSON.stringify({ type: 'params', payload: { tradeVolume: parseFloat(vol) } }));
-                setTimeout(() => ws.send(JSON.stringify({ type: 'make_long' })), 100);
-                addLog(`手动做多, 手数=${vol}`, 'info');
+                
+                // FIXED: Include task_id in the manual trade payload
+                setTimeout(() => ws.send(JSON.stringify({ 
+                    type: 'make_long', 
+                    payload: { task_id: currentTask } 
+                })), 100);
+                
+                addLog(`手动做多 [${currentTask}], 手数=${vol}`, 'info');
             };
             
             const shortHandler = () => {
                 const vol = document.getElementById('tradeVol').value;
                 ws.send(JSON.stringify({ type: 'params', payload: { tradeVolume: parseFloat(vol) } }));
-                setTimeout(() => ws.send(JSON.stringify({ type: 'make_short' })), 100);
-                addLog(`手动做空, 手数=${vol}`, 'info');
+                
+                // FIXED: Include task_id in the manual trade payload
+                setTimeout(() => ws.send(JSON.stringify({ 
+                    type: 'make_short', 
+                    payload: { task_id: currentTask } 
+                })), 100);
+                
+                addLog(`手动做空 [${currentTask}], 手数=${vol}`, 'info');
             };
             
             const closeAllHandler = () => {
-                if (confirm("确定要全部平仓吗？")) {
-                    ws.send(JSON.stringify({ type: 'close_all' }));
-                    addLog('全部平仓已触发', 'warn');
+                if (confirm(`确定要平仓任务 ${currentTask} 的所有仓位吗？`)) {
+                    // FIXED: Include task_id in close_all
+                    ws.send(JSON.stringify({ 
+                        type: 'close_all',
+                        payload: { task_id: currentTask }
+                    }));
+                    addLog(`任务 ${currentTask} 全部平仓已触发`, 'warn');
                 }
             };
             
@@ -1600,25 +1803,21 @@
                 const dir = o.direction || '--';
                 const level = o.level || 1;
                 const vol = o.vol || '--';
-                const status = o.status || '--';
+                const status = typeof o.status === 'boolean' ? (o.status ? '成功' : '失败') : o.status;
                 const prices = o.prices || {};
                 const signal = o.signal || {};
                 const ema = o.ema;
                 const mt5Pnl = o.mt5_pnl || 0;
                 const okxPnl = o.okx_pnl || 0;
                 const itemPnl = mt5Pnl + okxPnl;
-                const symbolA = o.symbol_a || '';
-                const symbolB = o.symbol_b || '';
-                const exchangeA = o.exchange_a || '';
-                const exchangeB = o.exchange_b || '';
 
                 const pnlClass = itemPnl > 0 ? 'pnl-positive' : (itemPnl < 0 ? 'pnl-negative' : 'pnl-zero');
 
                 let statusHtml = '';
-                if (status === 'filled_all') {
+                if (status === '成功') {
                     statusHtml = '<span style="color: var(--green);">✓ 成交</span>';
-                } else if (status.includes('failed')) {
-                    statusHtml = `<span style="color: var(--red);">✗ ${status}</span>`;
+                } else if (status === '失败') {
+                    statusHtml = `<span style="color: var(--red);">✗ 失败</span>`;
                 } else if (status.includes('skipped')) {
                     statusHtml = `<span style="color: #d29922;">⊘ ${status}</span>`;
                 } else {
@@ -1646,26 +1845,21 @@
                     triggerDesc = `<div class="trigger-desc">${signal.trigger}</div>`;
                 }
 
-                // 新增：显示品种和交易所
-                let symbolInfo = '';
-                if (symbolA || symbolB || exchangeA || exchangeB) {
-                    symbolInfo = `<div class="order-symbol-info" style="color: var(--text-secondary); font-size: 0.8rem; margin-bottom: 2px;">
-                        <span>品种A: ${symbolA} (${exchangeA})</span> &nbsp; <span>品种B: ${symbolB} (${exchangeB})</span>
-                    </div>`;
-                }
+                // 详情弹窗
+                const detailsBtn = `<button class="order-details-btn" onclick='showOrderDetails(${JSON.stringify(o)})'>详情</button>`;
 
                 return `
                     <div class="order-log-item">
-                        ${symbolInfo}
                         <div class="order-log-header">
                             <div>
                                 <span class="order-log-dir ${dir}">${dir.toUpperCase()} L${level}</span>
                                 <span style="margin-left: 8px;">${vol} 手</span>
                             </div>
-                            <div>
+                            <div style="display:flex; align-items:center; gap:8px;">
                                 <span class="order-log-pnl ${pnlClass}">
                                     ${itemPnl >= 0 ? '+' : ''}${itemPnl.toFixed(2)}
                                 </span>
+                                ${detailsBtn}
                             </div>
                         </div>
                         <div style="display: flex; justify-content: space-between; color: var(--text-secondary); font-size: 0.8rem;">
@@ -1674,21 +1868,102 @@
                         </div>
                         ${triggerDesc}
                         <div class="order-log-prices">
-                            <div>MT5: ${prices.mt5_bid?.toFixed(2) || '--'} / ${prices.mt5_ask?.toFixed(2) || '--'}</div>
-                            <div>OKX: ${prices.okx_bid?.toFixed(2) || '--'} / ${prices.okx_ask?.toFixed(2) || '--'}</div>
+                            <div>${window._exAName || 'ExA'}: ${prices.mt5_bid?.toFixed(2) || '--'} / ${prices.mt5_ask?.toFixed(2) || '--'}</div>
+                            <div>${window._exBName || 'ExB'}: ${prices.okx_bid?.toFixed(2) || '--'} / ${prices.okx_ask?.toFixed(2) || '--'}</div>
                             <div>做空价差: ${prices.spread_sell?.toFixed(2) || '--'}</div>
                             <div>做多价差: ${prices.spread_buy?.toFixed(2) || '--'}</div>
-                        </div>
                         </div>
                     </div>
                 `;
             }).join('');
+
+            // 详情弹窗函数 - 更清晰的 UI
+            window.showOrderDetails = function(order) {
+                const mt5 = order.mt5_result || {};
+                const okx = order.okx_result || {};
+                const statusText = (typeof order.status === 'boolean') ? (order.status ? '成功' : '失败') : (order.status || '--');
+                const statusClass = (typeof order.status === 'boolean') ? (order.status ? 'badge-success' : 'badge-fail') : (String(order.status).includes('skipped') ? 'badge-warn' : '');
+
+                const html = `
+                    <div class="order-modal-content">
+                        <div class="order-modal-header">
+                            <div>
+                                <strong>订单详情</strong>
+                                <div style="font-size:0.85rem;color:var(--text-secondary);">Task: ${order.task_id || '--'} · ID: ${order.order_id || '--'}</div>
+                            </div>
+                        </div>
+                        <div class="order-modal-tabs">
+                            <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+                                <div class="${statusClass}">${statusText}</div>
+                                <div style="font-size:0.85rem;color:var(--text-secondary);">${order.ts || '--'}</div>
+                            </div>
+                        </div>
+                        <div class="order-modal-body">
+                            <div class="order-row">
+                                <div class="order-section">
+                                    <h4>${window._exAName || 'ExA'} 交易</h4>
+                                    <div class="order-kv"><div>Symbol</div><div class="v">${mt5.symbol || '--'}</div></div>
+                                    <div class="order-kv"><div>Side</div><div class="v">${mt5.side || '--'}</div></div>
+                                    <div class="order-kv"><div>Volume</div><div class="v">${mt5.volume ?? '--'}</div></div>
+                                    <div class="order-kv"><div>Filled</div><div class="v">${mt5.filled_volume ?? '--'}</div></div>
+                                    <div class="order-kv"><div>Avg Price</div><div class="v">${mt5.avg_price ?? '--'}</div></div>
+                                    <div class="order-kv"><div>Order ID</div><div class="v">${mt5.order_id || '--'}</div></div>
+                                    ${mt5.error ? `<div style="margin-top:8px;" class="badge-warn">错误: ${mt5.error}</div>` : ''}
+                                </div>
+                                <div class="order-section">
+                                    <h4>${window._exBName || 'ExB'} 交易</h4>
+                                    <div class="order-kv"><div>Symbol</div><div class="v">${okx.symbol || '--'}</div></div>
+                                    <div class="order-kv"><div>Side</div><div class="v">${okx.side || '--'}</div></div>
+                                    <div class="order-kv"><div>Volume</div><div class="v">${okx.volume ?? '--'}</div></div>
+                                    <div class="order-kv"><div>Filled</div><div class="v">${okx.filled_volume ?? '--'}</div></div>
+                                    <div class="order-kv"><div>Avg Price</div><div class="v">${okx.avg_price ?? '--'}</div></div>
+                                    <div class="order-kv"><div>Order ID</div><div class="v">${okx.order_id || '--'}</div></div>
+                                    ${okx.error ? `<div style="margin-top:8px;" class="badge-warn">错误: ${okx.error}</div>` : ''}
+                                </div>
+                            </div>
+
+                            <div class="order-row">
+                                <div class="order-section">
+                                    <h4>信号 & 触发</h4>
+                                    <div class="order-kv"><div>Trigger</div><div class="v">${(order.signal && order.signal.trigger) || '--'}</div></div>
+                                    <div class="order-kv"><div>Action</div><div class="v">${(order.signal && order.signal.action) || '--'}</div></div>
+                                    <div class="order-kv"><div>Level</div><div class="v">${(order.signal && order.signal.level) || '--'}</div></div>
+                                    <div style="font-size:0.9rem;color:var(--text-secondary);margin-top:8px;">${(order.signal && order.signal.reason) ? ('原因: ' + order.signal.reason) : ''}</div>
+                                </div>
+                                <div class="order-section">
+                                    <h4>价格快照</h4>
+                                    <div class="order-kv"><div>${window._exAName || 'ExA'} Bid / Ask</div><div class="v">${order.prices?.mt5_bid ?? '--'} / ${order.prices?.mt5_ask ?? '--'}</div></div>
+                                    <div class="order-kv"><div>${window._exBName || 'ExB'} Bid / Ask</div><div class="v">${order.prices?.okx_bid ?? '--'} / ${order.prices?.okx_ask ?? '--'}</div></div>
+                                    <div class="order-kv"><div>Spread Sell / Buy</div><div class="v">${order.prices?.spread_sell ?? '--'} / ${order.prices?.spread_buy ?? '--'}</div></div>
+                                </div>
+                            </div>
+
+                            <div class="order-section">
+                                <h4>Raw Details</h4>
+                                <div class="order-pre"><strong>${window._exAName || 'ExA'}</strong>
+<pre>${JSON.stringify(mt5, null, 2)}</pre>
+                                </div>
+                                <div class="order-pre" style="margin-top:8px;"><strong>${window._exBName || 'ExB'}</strong>
+<pre>${JSON.stringify(okx, null, 2)}</pre>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+
+                const modal = document.createElement('div');
+                modal.className = 'order-modal';
+                modal.innerHTML = html;
+                // click outside to close
+                modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
+                document.body.appendChild(modal);
+            };
         }
         
         // Refresh Order Logs button
         document.getElementById('refreshOrderLogs')?.addEventListener('click', () => {
             if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: 'get_order_logs', limit: 50 }));
+                ws.send(JSON.stringify({ type: 'get_order_logs', payload: { limit: 50, task_id: currentTask } }));
                 addLog('正在获取订单日志...', 'info');
             }
         });
@@ -1747,6 +2022,7 @@
             // Set spread data
             if (spreadSellData.length > 0 || spreadBuyData.length > 0) {
                 if (spreadSellData.length > 0) spreadSellSeries.setData(spreadSellData);
+                    console.debug('loadHistory: spreadSellData length=', spreadSellData.length, 'sample=', spreadSellData.slice(-3));
                 if (spreadBuyData.length > 0) spreadBuySeries.setData(spreadBuyData);
 
                 globalSpreadData = [...spreadSellData];
@@ -1773,7 +2049,8 @@
             document.getElementById('mt5Symbol').textContent = params.MT5_SYMBOL || '-';
             document.getElementById('okxSymbol').textContent = params.OKX_SYMBOL || '-';
 
-            const editableKeys = ['emaPeriod', 'firstSpread', 'nextSpread', 'takeProfit', 'maxPos'];
+            const editableKeys = ['emaPeriod', 'firstSpread', 'nextSpread', 'takeProfit', 'maxPos', 'qtyMultiplier', 'smoothingSeconds'];
+            
             paramsForm.innerHTML = '';
             
             editableKeys.forEach(key => {
@@ -1786,12 +2063,19 @@
                     input.type = 'number';
                     input.value = params[key];
                     input.dataset.key = key;
-                    input.step = key.includes('Spread') || key.includes('Profit') ? '0.1' : '1';
+                    input.step = key.includes('Spread') || key.includes('Profit') || key === 'smoothingSeconds' ? '0.1' : (key === 'qtyMultiplier' ? '100' : '1');
                     div.appendChild(label);
                     div.appendChild(input);
                     paramsForm.appendChild(div);
                 }
             });
+
+            // Re-render thresholds if spread params changed
+            if (params.firstSpread !== undefined || params.nextSpread !== undefined || params.maxPos !== undefined) {
+                 if (typeof globalEmaData !== 'undefined' && globalEmaData.length > 0) {
+                     setThresholdSeriesData(globalEmaData);
+                 }
+            }
 
             document.getElementById('tradeVol').value = params.tradeVolume || 0.01;
             
@@ -1812,12 +2096,16 @@
             const v = document.getElementById('tradeVol').value;
             if (v) payload['tradeVolume'] = parseFloat(v);
             
+            // Add task_id to payload to make it specific
+            payload['task_id'] = currentTask;
+
             if (ws && ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({ type: 'params', payload }));
                 addLog('参数已更新', 'success');
                 
                 setTimeout(() => {
-                    ws.send(JSON.stringify({ type: 'refresh_history' }));
+                    // FIXED: refresh history for current task
+                    ws.send(JSON.stringify({ type: 'refresh_history', payload: { task_id: currentTask } }));
                 }, 200);
             }
         });
@@ -1854,11 +2142,19 @@
             if (bar.okx && bar.okx.close > 0) document.getElementById('okxVal').textContent = bar.okx.close.toFixed(2);
 
             if (bar.spread_sell !== undefined && spreadSellSeries) {
+                console.debug('updateCharts: updating spreadSell', time, bar.spread_sell);
                 spreadSellSeries.update({ time: time, value: bar.spread_sell });
+            } else if (bar.spread !== undefined && spreadSellSeries) {
+                console.debug('updateCharts: updating spreadSell(fallback)', time, bar.spread);
+                // Fallback: some bars provide only `spread` instead of `spread_sell`
+                spreadSellSeries.update({ time: time, value: bar.spread });
             }
             
             if (bar.spread_buy !== undefined && spreadBuySeries) {
                 spreadBuySeries.update({ time: time, value: bar.spread_buy });
+            } else if (bar.spread !== undefined && spreadBuySeries) {
+                // Fallback to `spread` when explicit buy/sell fields are absent
+                spreadBuySeries.update({ time: time, value: bar.spread });
             }
             
             // Sync EMA series with Bar Data (1m update)
@@ -1881,12 +2177,22 @@
             if (globalSpreadData.length === 0 || globalSpreadData[globalSpreadData.length - 1].time !== time) {
                 globalSpreadData.push({ time: time, value: bar.spread_sell || bar.spread });
                 globalEmaData.push({ time: time, value: bar.ema });
-                
+
                 if (globalSpreadData.length > 5000) {
                     globalSpreadData = globalSpreadData.slice(-5000);
                     globalEmaData = globalEmaData.slice(-5000);
                 }
-                
+
+                // Debug: log and force-series redraw to ensure line is repainted
+                try {
+                    console.debug('globalSpreadData len=', globalSpreadData.length, 'last=', globalSpreadData.slice(-3));
+                    if (spreadSellSeries) spreadSellSeries.setData(globalSpreadData);
+                    if (emaSellSeries) emaSellSeries.setData(globalEmaData);
+                    if (spreadBuySeries) spreadBuySeries.setData(globalSpreadData);
+                } catch (e) {
+                    console.debug('setData redraw error', e);
+                }
+
                 renderOrderMarkers();
             }
             

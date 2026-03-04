@@ -14,6 +14,7 @@ Options:
 import asyncio
 import signal
 import sys
+import os
 from pathlib import Path
 
 # Add parent directory to path for imports
@@ -49,6 +50,7 @@ class SpreadTradingApp:
         
         self.handler = None
         self._monitor_task: Optional[asyncio.Task] = None
+        self._daily_restart_task: Optional[asyncio.Task] = None
     
     async def start(self):
         """Start the application."""
@@ -91,6 +93,8 @@ class SpreadTradingApp:
 
         # Start monitor task to log runtime metrics periodically
         self._monitor_task = asyncio.create_task(self._monitor_loop())
+
+        # Daily restart logic removed — manage restarts externally if needed
         
         # Default task creation removed as per user request
         # if not self.manager.tasks:
@@ -269,6 +273,10 @@ class SpreadTradingApp:
                 logger.warning(f"Monitor loop error: {e}")
 
             await asyncio.sleep(interval)
+
+    # Note: daily restart loop removed to avoid in-process re-exec. If automatic
+    # restarts are required, manage them using an external supervisor (service,
+    # systemd, scheduled task, container restart policy, etc.).
 
 
 async def main():

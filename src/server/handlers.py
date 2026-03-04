@@ -119,7 +119,7 @@ class MessageHandler:
         if task_id and task_id in self.manager.tasks:
             new_params = {}
             # Copy known params
-            for key in ["emaPeriod", "firstSpread", "nextSpread", "takeProfit", "maxPos", "tradeVolume", "autoTrade", "qtyMultiplier", "dryRun"]:
+            for key in ["emaPeriod", "firstSpread", "nextSpread", "takeProfit", "maxPos", "tradeVolume", "autoTrade", "qtyMultiplier", "dryRun", "smoothingSeconds"]:
                 if key in payload:
                     if key in ["emaPeriod", "maxPos"]:
                         new_params[key] = int(payload[key])
@@ -494,6 +494,25 @@ class MessageHandler:
             settings.strategy.dry_run = bool(payload["dryRun"])
         if "defaultVolume" in payload:
             settings.strategy.trade_volume = float(payload["defaultVolume"])
+        # Allow clients to set smoothingSeconds; propagate to all tasks
+        if "smoothingSeconds" in payload:
+            try:
+                s = float(payload["smoothingSeconds"])
+            except Exception:
+                s = None
+            if s is not None:
+                # Persist to global settings if available
+                if hasattr(settings.strategy, 'smoothing_seconds'):
+                    try:
+                        settings.strategy.smoothing_seconds = s
+                    except Exception:
+                        pass
+                # Update running tasks' configs
+                for t_id in list(self.manager.tasks.keys()):
+                    try:
+                        self.manager.update_task_params(t_id, {"smoothingSeconds": s})
+                    except Exception:
+                        logger.debug(f"Failed to update smoothing for {t_id}")
         
         await self.send(websocket, {
             "type": "settings_updated",
@@ -794,6 +813,8 @@ class MessageHandler:
                 # Merge task config with some global settings if needed, 
                 # but primarily return task config.
                 response = task.config.copy()
+                # Ensure smoothingSeconds has a default so frontend always shows it
+                response.setdefault("smoothingSeconds", 5.0)
                 # Ensure we include task_id so frontend knows context
                 response["task_id"] = task_id
                 

@@ -127,7 +127,13 @@ def get_api_credentials(exchange: str) -> Tuple[str, str, str]:
     
     api_key = os.getenv(env_map.get("key", ""), "")
     api_secret = os.getenv(env_map.get("secret", ""), "")
+
+    # Password/passphrase may be stored under multiple names in .env.
     password = os.getenv(env_map.get("password", ""), "")
+    if not password:
+        upper = exchange.upper()
+        # try common alternatives
+        password = os.getenv(f"{upper}_PASSWORD", "") or os.getenv(f"{upper}_PASSPHRASE", "") or os.getenv(f"{upper}_API_PASSPHRASE", "")
     
     return api_key, api_secret, password
 
